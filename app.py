@@ -3,7 +3,7 @@ import pandas as pd
 import hashlib
 
 # 1. 页面配置
-st.set_page_config(page_title="抓鬼用户自定义审计", layout="wide")
+st.set_page_config(page_title="自定", layout="wide")
 
 # 2. 登录逻辑
 if "auth" not in st.session_state:
@@ -13,7 +13,7 @@ if not st.session_state.auth:
     st.title("🔒 财务安全登录")
     pwd = st.text_input("请输入访问密码", type="password")
     if st.button("登录"):
-        if pwd == "888":
+        if pwd == "0224":
             st.session_state.auth = True
             st.rerun()
         else:
