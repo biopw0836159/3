@@ -52,7 +52,7 @@ if not st.session_state.auth:
         st.markdown("<div style='height:100px'></div>", unsafe_allow_html=True)
         st.markdown("""
             <div style='background-color:white; padding:40px; border-radius:15px; box-shadow:0 10px 25px rgba(0,0,0,0.1)'>
-                <h2 style='text-align:center; color:#1e3c72;'>🔐 自定</h2>
+                <h2 style='text-align:center; color:#1e3c72;'>🔐 审计系统安全登录</h2>
             </div>
         """, unsafe_allow_html=True)
         pwd = st.text_input("请输入访问密码", type="password")
