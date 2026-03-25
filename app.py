@@ -3,7 +3,7 @@ import pandas as pd
 import hashlib
 
 # 1. 页面配置
-st.set_page_config(page_title="自己订", layout="wide")
+st.set_page_config(page_title="高级风险审计系统 V22", layout="wide")
 
 # 2. 注入极致美化 CSS (保留高颜值)
 st.markdown("""
@@ -39,10 +39,10 @@ if not st.session_state.auth:
     c1, c2, c3 = st.columns([1, 1.5, 1])
     with c2:
         st.markdown("<div style='height:100px'></div>", unsafe_allow_html=True)
-        st.title("🔐 欢迎光临")
+        st.title("🔐 系统安全登录")
         pwd = st.text_input("请输入访问密码", type="password")
         if st.button("进入系统"):
-            if pwd == "0224":
+            if pwd == "888":
                 st.session_state.auth = True
                 st.rerun()
             else:
@@ -143,7 +143,7 @@ with st.sidebar:
 # 6. 主页面渲染
 st.markdown("""
     <div class='title-banner'>
-        <h1 style='margin:0;'>📊 抓抓抓</h1>
+        <h1 style='margin:0;'>📊 智能风险审计平台 V22</h1>
         <p style='margin:0; opacity:0.8;'>自定义动态引擎 · 实时反馈</p>
     </div>
 """, unsafe_allow_html=True)
