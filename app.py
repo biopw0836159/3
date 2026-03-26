@@ -18,15 +18,15 @@ st.markdown("""
         padding: 25px; border-radius: 15px; color: white; text-align: center; 
         margin-bottom: 25px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
     }
-    .table-header {
-        background-color: #e2e8f0; padding: 12px 10px; border-radius: 8px;
-        font-weight: bold; color: #475569; margin-bottom: 10px;
-        display: flex; align-items: center; font-size: 14px;
-    }
     .badge {
         background-color: #fee2e2; color: #ef4444;
         padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: bold;
         border: 1px solid #fecaca;
+    }
+    .table-header {
+        background-color: #e2e8f0; padding: 12px 10px; border-radius: 8px;
+        font-weight: bold; color: #475569; margin-bottom: 10px;
+        display: flex; align-items: center; font-size: 14px;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -70,23 +70,25 @@ def run_audit_engine(df, rules):
         temp_df['盈亏'] = pd.to_numeric(df[final_cols['profit']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         temp_df['派奖额'] = temp_df['销量'] * pd.to_numeric(df[final_cols['rtp']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
 
-        # 汇总
         grouped = temp_df.groupby('用户名').agg({'销量':'sum','单数':'sum','盈亏':'sum','派奖额':'sum'}).reset_index()
         grouped['RTP'] = grouped.apply(lambda x: x['派奖额'] / x['销量'] if x['销量'] > 0 else 0, axis=1)
 
         def apply_logic(row):
             v, c, p, r = row['销量'], row['单数'], row['盈亏'], row['RTP']
-            if rules['use_manual']:
-                if rules['v_on'] and not (rules['v_min'] <= v <= rules['v_max']): return None
-                if rules['c_on'] and not (c <= rules['c_limit']): return None
-                if rules['p_on'] and not (rules['p_min'] <= p <= rules['p_max']): return None
-                if rules['r_on'] and not (rules['r_min'] <= r <= rules['r_max']): return None
-                return "手动筛选"
+            if rules.get('use_manual', False):
+                match = True
+                if rules['v_on'] and not (rules['v_min'] <= v <= rules['v_max']): match = False
+                if rules['c_on'] and not (c <= rules['c_limit']): match = False
+                if rules['p_on'] and not (rules['p_min'] <= p <= rules['p_max']): match = False
+                if rules['r_on'] and not (rules['r_min'] <= r <= rules['r_max']): match = False
+                return "手动筛选命中" if match else None
             else:
                 m = []
+                # 老大要求的核心固定条件
                 if 1000 <= v <= 2000 and c <= 12: m.append("疑似刷人数")
                 if v > 2000 and c <= 10: m.append("疑似对刷")
-                if v > 500000 and 0.995 <= r <= 1.005: m.append("刷量嫌疑")
+                # 辅助专家条件
+                if v > 500000 and 0.995 <= r <= 1.005: m.append("高标刷量")
                 if p > 100000: m.append("盈利大户")
                 return " | ".join(m) if m else None
 
@@ -96,15 +98,14 @@ def run_audit_engine(df, rules):
 
 # 5. 侧边栏
 with st.sidebar:
-    st.markdown("### 🛠️ 参数设定")
-    
-    # 手动模式总开关
-    use_manual = st.toggle("🚀 启用手动自定义模式", value=False)
+    st.markdown("### 🛠️ 自定义模式 (可选)")
+    use_manual = st.toggle("🚀 启用手动筛选", value=False)
     
     st.write("---")
+    # 彻底解锁数值：不再设置 min/max 限制，随便打字
     v_on = st.toggle("销量过滤", False)
-    v_min = st.number_input("销量 Min", value=0.0) # 彻底去掉限制
-    v_max = st.number_input("销量 Max", value=10000000.0)
+    v_min = st.number_input("销量 Min", value=1000.0) 
+    v_max = st.number_input("销量 Max", value=2000.0)
     
     st.write("---")
     c_on = st.toggle("单数过滤", False)
@@ -121,37 +122,44 @@ with st.sidebar:
     r_max = st.number_input("RTP Max", value=2.0, format="%.3f")
     
     st.write("---")
-    # 【关键：确定键】
-    run_btn = st.button("🔥 立即执行审计", use_container_width=True, type="primary")
-    
-    current_rules = {
+    # 确定键只针对手动模式
+    manual_btn = st.button("✅ 应用手动筛选结果", use_container_width=True)
+
+    rules = {
         'use_manual': use_manual, 'v_on': v_on, 'v_min': v_min, 'v_max': v_max,
         'c_on': c_on, 'c_limit': c_limit, 'p_on': p_on, 'p_min': p_min, 'p_max': p_max,
         'r_on': r_on, 'r_min': r_min, 'r_max': r_max
     }
 
 # 6. 主页面
-st.markdown("<div class='title-banner'><h1>📊 抓抓抓</h1><p>已解锁数值输入 · 新增确定执行键</p></div>", unsafe_allow_html=True)
+st.markdown("<div class='title-banner'><h1>📊 抓抓抓</h1><p>默认执行：1000-2000(≤12) | >2000(≤10)</p></div>", unsafe_allow_html=True)
 file = st.file_uploader("📂 丢这边", type=["xlsx", "csv"])
 
-# 逻辑控制：只有点击按钮或已存在结果才运行
 if file:
-    if run_btn:
+    # 逻辑：如果没有开启手动模式，上传后直接自动运行
+    # 如果开启了手动模式，则等待按钮按下
+    should_run = False
+    if not use_manual:
+        should_run = True
+    elif manual_btn:
+        should_run = True
+
+    if should_run:
         try:
             raw = pd.read_excel(file) if file.name.endswith('.xlsx') else pd.read_csv(file)
-            st.session_state.res_data = run_audit_engine(raw, current_rules)
+            st.session_state.res_data = run_audit_engine(raw, rules)
             st.session_state.read_set = set()
-            st.success("✅ 审计执行完毕！")
-        except: st.error("文件读取失败")
+        except: st.error("文件格式有误")
 
     res = st.session_state.get("res_data")
     if res is not None and not res.empty:
         # 排序
         col1, col2 = st.columns([1, 1])
-        sort_target = col1.selectbox("排序字段", ["销量", "盈亏", "单数", "RTP"], index=0)
+        sort_target = col1.selectbox("排序名目", ["销量", "盈亏", "单数", "RTP"], index=0)
         res = res.sort_values(by=sort_target, ascending=False)
 
-        # 表头
+        st.warning(f"🎯 扫描结果：共锁定 {len(res)} 个风险账号")
+
         st.markdown("""
             <div class='table-header'>
                 <div style='flex:0.8'>核查</div>
@@ -169,7 +177,7 @@ if file:
                 u = row['用户名']
                 is_read = u in st.session_state.read_set
                 cols = st.columns([0.8, 2, 2.5, 1.5, 1.2, 1.5, 1.2])
-                if cols[0].checkbox(" ", key=f"check_{u}_{i}", value=is_read):
+                if cols[0].checkbox(" ", key=f"c_{u}_{i}", value=is_read):
                     st.session_state.read_set.add(u)
                 else: st.session_state.read_set.discard(u)
 
@@ -181,6 +189,6 @@ if file:
                 cols[5].markdown(f"<span style='{style}'>{row['盈亏']:,.0f}</span>", unsafe_allow_html=True)
                 cols[6].markdown(f"<span style='{style}'>{row['RTP']:.3f}</span>", unsafe_allow_html=True)
                 st.divider()
-        st.download_button("📥 导出报告", res.to_csv(index=False).encode('utf-8-sig'), "audit.csv")
+        st.download_button("📥 导出结果", res.to_csv(index=False).encode('utf-8-sig'), "audit_report.csv")
     elif res is not None:
-        st.info("💡 当前筛选条件下未发现异常。")
+        st.info("✅ 扫描完毕，未发现异常账号。")
