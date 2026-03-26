@@ -109,4 +109,84 @@ def run_audit_engine(df, rules):
         return clean_df[clean_df['原因'].notna()].copy()
     except: return None
 
-# 5.
+# 5. 侧边栏 - 自定义参数设定
+with st.sidebar:
+    st.markdown("### 🛠️ 自定义审计参数")
+    st.info("开启开关后，固定逻辑将失效，完全按您的设定抓人。")
+    
+    st.write("---")
+    v_on = st.toggle("启用销量过滤", False)
+    v_min = st.number_input("销量最小值", value=1000.0)
+    v_max = st.number_input("销量最大值", value=10000000.0)
+    
+    st.write("---")
+    c_on = st.toggle("启用单数过滤", False)
+    c_limit = st.number_input("单数上限 (≤)", value=12)
+
+    st.write("---")
+    p_on = st.toggle("启用盈亏过滤", False)
+    p_min = st.number_input("盈亏 Min", value=-1000000.0)
+    p_max = st.number_input("盈亏 Max", value=1000000.0)
+
+    st.write("---")
+    r_on = st.toggle("启用 RTP 过滤", False)
+    r_val = st.slider("RTP 范围", 0.0, 2.0, (0.0, 1.0))
+    
+    rules = {'v_on':v_on, 'v_min':v_min, 'v_max':v_max, 'c_on':c_on, 'c_limit':c_limit, 'p_on':p_on, 'p_min':p_min, 'p_max':p_max, 'r_on':r_on, 'r_min':r_val[0], 'r_max':r_val[1]}
+
+# 6. 主页面布局
+st.markdown("<div class='title-banner'><h1>📊 高级风险审计平台</h1><p>全动态参数筛选 + 专家预警模式</p></div>", unsafe_allow_html=True)
+
+file = st.file_uploader("📂 请上传转档后的数据文件", type=["xlsx", "csv"])
+
+if file:
+    # 强制哈希刷新机制
+    file_bytes = file.getvalue()
+    file_id = hashlib.md5(file_bytes + str(rules).encode()).hexdigest()
+
+    if st.session_state.get("last_id") != file_id:
+        try:
+            raw = pd.read_excel(file) if file.name.endswith('.xlsx') else pd.read_csv(file)
+            st.session_state.res_data = run_audit_engine(raw, rules)
+            st.session_state.read_set = set()
+            st.session_state.last_id = file_id
+        except: st.error("文件格式有误，请确认内容。")
+
+    res = st.session_state.get("res_data")
+
+    if res is not None and not res.empty:
+        # 数据卡片
+        m1, m2, m3 = st.columns(3)
+        m1.markdown(f"<div class='metric-card'><small>风险会员</small><br><b style='color:#ef4444; font-size:26px;'>{len(res)} 人</b></div>", unsafe_allow_html=True)
+        m2.markdown(f"<div class='metric-card'><small>异常销量</small><br><b style='font-size:26px;'>￥{res['销量'].sum():,.0f}</b></div>", unsafe_allow_html=True)
+        m3.markdown(f"<div class='metric-card'><small>模式状态</small><br><b style='color:#10b981; font-size:26px;'>{'手动筛选' if any([v_on,c_on,p_on,r_on]) else '专家逻辑'}</b></div>", unsafe_allow_html=True)
+
+        st.write("---")
+        # 排序
+        res = res.sort_values(by="销量", ascending=False)
+        
+        # 列表展示
+        with st.container(height=500):
+            for i, row in res.iterrows():
+                u = row['用户名']
+                is_read = u in st.session_state.read_set
+                cols = st.columns([0.8, 2, 2.5, 2, 1, 2, 2])
+                
+                if cols[0].checkbox(" ", key=f"k_{u}_{i}", value=is_read):
+                    st.session_state.read_set.add(u)
+                else: st.session_state.read_set.discard(u)
+
+                style = "color:#94a3b8; text-decoration:line-through;" if is_read else "color:#1e293b; font-weight:500;"
+                cols[1].markdown(f"<span style='{style}'>{u}</span>", unsafe_allow_html=True)
+                cols[2].markdown(f"<span class='badge'>{row['原因']}</span>", unsafe_allow_html=True)
+                cols[3].markdown(f"<span style='{style}'>销量: {row['销量']:,.0f}</span>", unsafe_allow_html=True)
+                cols[4].markdown(f"<span style='{style}'>单数: {int(row['单数'])}</span>", unsafe_allow_html=True)
+                cols[5].markdown(f"<span style='{style}'>盈亏: {row['盈亏']:,.0f}</span>", unsafe_allow_html=True)
+                cols[6].markdown(f"<span style='{style}'>RTP: {row['RTP']:.3f}</span>", unsafe_allow_html=True)
+                st.divider()
+        
+        st.download_button("📥 导出审计报告", res.to_csv(index=False).encode('utf-8-sig'), "audit_report.csv")
+    elif res is not None:
+        st.success("✅ 扫描完成，当前条件下未发现异常会员。")
+else:
+    st.info("👋 欢迎回来！请上传数据文件。提示：左侧参数开关全关时，系统会自动执行“专家抓鬼逻辑”。")
