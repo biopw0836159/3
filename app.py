@@ -28,7 +28,6 @@ st.markdown("""
         padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: bold;
         border: 1px solid #fecaca;
     }
-    /* 排序控件区 */
     .sort-bar {
         background: white; padding: 15px; border-radius: 10px; 
         margin-bottom: 15px; border: 1px solid #e2e8f0;
@@ -75,7 +74,6 @@ def run_audit_engine(df, rules):
         temp_df['盈亏'] = pd.to_numeric(df[final_cols['profit']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         temp_df['派奖额'] = temp_df['销量'] * pd.to_numeric(df[final_cols['rtp']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
 
-        # 汇总同名用户
         grouped = temp_df.groupby('用户名').agg({'销量':'sum','单数':'sum','盈亏':'sum','派奖额':'sum'}).reset_index()
         grouped['RTP'] = grouped.apply(lambda x: x['派奖额'] / x['销量'] if x['销量'] > 0 else 0, axis=1)
 
@@ -100,26 +98,36 @@ def run_audit_engine(df, rules):
         return grouped[grouped['原因'].notna()].copy()
     except: return None
 
-# 5. 侧边栏
+# 5. 侧边栏 - 全部改为手动输入
 with st.sidebar:
     st.markdown("### 🛠️ 参数设定")
+    
+    # 销量
     v_on = st.toggle("销量过滤", False)
     v_min = st.number_input("销量 Min", value=0.0, step=100.0)
     v_max = st.number_input("销量 Max", value=10000000.0, step=100.0)
+    
     st.write("---")
+    # 单数
     c_on = st.toggle("单数限制", False)
     c_limit = st.number_input("单数上限 (≤)", value=12, step=1)
+    
     st.write("---")
+    # 盈亏
     p_on = st.toggle("盈亏过滤", False)
     p_min = st.number_input("盈亏 Min", value=-5000000.0, step=1000.0)
     p_max = st.number_input("盈亏 Max", value=5000000.0, step=1000.0)
+    
     st.write("---")
+    # RTP - 【关键改动：打字模式】
     r_on = st.toggle("RTP 过滤", False)
-    r_val = st.slider("RTP 范围", 0.0, 5.0, (0.0, 1.0), step=0.01)
-    rules = {'v_on':v_on,'v_min':v_min,'v_max':v_max,'c_on':c_on,'c_limit':c_limit,'p_on':p_on,'p_min':p_min,'p_max':p_max,'r_on':r_on,'r_min':r_val[0],'r_max':r_val[1]}
+    r_min = st.number_input("RTP Min (如0.99)", value=0.0, step=0.001, format="%.3f")
+    r_max = st.number_input("RTP Max (如1.01)", value=1.0, step=0.001, format="%.3f")
+    
+    rules = {'v_on':v_on,'v_min':v_min,'v_max':v_max,'c_on':c_on,'c_limit':c_limit,'p_on':p_on,'p_min':p_min,'p_max':p_max,'r_on':r_on,'r_min':r_min,'r_max':r_max}
 
 # 6. 主页面
-st.markdown("<div class='title-banner'><h1>📊 风险审计平台 V38</h1><p>已启用：动态排序 · 自动汇总 · 固定名目</p></div>", unsafe_allow_html=True)
+st.markdown("<div class='title-banner'><h1>📊 抓抓抓</h1><p>全参数打字录入 · 动态排序 · 自动汇总</p></div>", unsafe_allow_html=True)
 file = st.file_uploader("📂 丢这边", type=["xlsx", "csv"])
 
 if file:
@@ -133,21 +141,18 @@ if file:
 
     res = st.session_state.get("res_data")
     if res is not None and not res.empty:
-        # --- 排序功能区 ---
+        # 排序功能
         with st.container():
             st.markdown("<div class='sort-bar'>", unsafe_allow_html=True)
             sc1, sc2, sc3 = st.columns([1, 2, 2])
             sort_target = sc2.selectbox("选择排序名目", ["销量", "盈亏", "单数", "RTP", "用户名"])
             sort_order = sc3.selectbox("排序方式", ["从大到小", "从小到大"])
             st.markdown("</div>", unsafe_allow_html=True)
-            
-            # 执行排序
-            is_asc = (sort_order == "从小到大")
-            res = res.sort_values(by=sort_target, ascending=is_asc)
+            res = res.sort_values(by=sort_target, ascending=(sort_order == "从小到大"))
 
         st.warning(f"🎯 扫描结果：共锁定 {len(res)} 个风险账号")
 
-        # --- 固定表头 ---
+        # 固定表头
         st.markdown("""
             <div class='table-header'>
                 <div style='flex:0.8'>核查</div>
@@ -160,13 +165,11 @@ if file:
             </div>
         """, unsafe_allow_html=True)
 
-        # --- 数据列表 ---
         with st.container(height=600):
             for i, row in res.iterrows():
                 u = row['用户名']
                 is_read = u in st.session_state.read_set
                 cols = st.columns([0.8, 2, 2.5, 1.5, 1.2, 1.5, 1.2])
-                
                 if cols[0].checkbox(" ", key=f"k_{u}_{i}", value=is_read):
                     st.session_state.read_set.add(u)
                 else: st.session_state.read_set.discard(u)
@@ -179,7 +182,6 @@ if file:
                 cols[5].markdown(f"<span style='{style}'>{row['盈亏']:,.0f}</span>", unsafe_allow_html=True)
                 cols[6].markdown(f"<span style='{style}'>{row['RTP']:.3f}</span>", unsafe_allow_html=True)
                 st.divider()
-        
-        st.download_button("📥 导出排序后的报告", res.to_csv(index=False).encode('utf-8-sig'), "audit_report_sorted.csv")
+        st.download_button("📥 导出排序后的报告", res.to_csv(index=False).encode('utf-8-sig'), "audit_report.csv")
     elif res is not None:
         st.success("✅ 未发现异常")
