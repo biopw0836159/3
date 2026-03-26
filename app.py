@@ -5,14 +5,44 @@ import hashlib
 # 1. 页面配置
 st.set_page_config(page_title="抓鬼专家", layout="wide")
 
-# 2. 极致美化 CSS
+# 2. 极致美化 CSS + 侧边栏箭头增强
 st.markdown("""
     <style>
     .stApp { background-color: #f8fafc; }
+    /* 侧边栏背景 */
     [data-testid="stSidebar"] { background-color: #1e293b !important; min-width: 350px !important; }
     [data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] label, [data-testid="stSidebar"] p, [data-testid="stSidebar"] h3 { 
         color: #ffffff !important; font-weight: 600 !important;
     }
+    
+    /* 【核心：增强左上角折叠按钮的可见度】 */
+    [data-testid="collapsedControl"] {
+        background-color: #ef4444 !important; /* 亮红色背景 */
+        border-radius: 0 10px 10px 0 !important;
+        width: 50px !important;
+        height: 50px !important;
+        top: 10px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        box-shadow: 2px 2px 10px rgba(0,0,0,0.3) !important;
+        z-index: 999999 !important;
+    }
+    [data-testid="collapsedControl"] svg {
+        color: white !important; /* 箭头变白色 */
+        transform: scale(1.5) !important; /* 箭头变大 */
+    }
+    
+    /* 强力闪烁动画，提醒老大这里有开关 */
+    @keyframes pulse-red {
+        0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+        70% { box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+    }
+    [data-testid="collapsedControl"] {
+        animation: pulse-red 2s infinite;
+    }
+
     div.stButton > button {
         width: 100%; border-radius: 8px; font-weight: bold;
         background-color: #ef4444 !important; color: white !important;
@@ -21,10 +51,6 @@ st.markdown("""
     .title-banner {
         background: linear-gradient(135deg, #0f172a 0%, #334155 100%);
         padding: 20px; border-radius: 12px; color: white; text-align: center; margin-bottom: 20px;
-    }
-    .status-box {
-        background-color: #f1f5f9; padding: 10px; border-radius: 8px; 
-        border-left: 5px solid #3b82f6; margin-bottom: 20px; font-size: 14px;
     }
     .badge {
         background-color: #fee2e2; color: #ef4444; padding: 2px 8px; 
@@ -53,18 +79,17 @@ if not st.session_state.auth:
 def run_audit_engine(df, rules):
     try:
         df.columns = [str(c).strip() for c in df.columns]
-        mapping = {'user':['用户名','账号','会员'], 'vol':['销量','投注'], 'cnt':['单数','次数'], 'profit':['盈亏','盈利'], 'rtp':['RTP','返还']}
+        mapping = {'user':['用户名','账号','会员'],'vol':['销量','投注'],'cnt':['单数','次数'],'profit':['盈亏','盈利'],'rtp':['RTP','返还']}
         final_cols = {}
-        for k, aliases in mapping.items():
-            for col in df.columns:
-                if any(a in col for a in aliases): final_cols[k] = col; break
-        if len(final_cols) < 5: return None
-
+        for k, v in mapping.items():
+            for c in df.columns:
+                if any(a in c for a in v): final_cols[k] = c; break
+        
         temp_df = pd.DataFrame()
         temp_df['用户名'] = df[final_cols['user']].astype(str)
-        for col_name, raw_key in [('销量','vol'), ('单数','cnt'), ('盈亏','profit')]:
-            temp_df[col_name] = pd.to_numeric(df[final_cols[raw_key]].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-        
+        temp_df['销量'] = pd.to_numeric(df[final_cols['vol']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+        temp_df['单数'] = pd.to_numeric(df[final_cols['cnt']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+        temp_df['盈亏'] = pd.to_numeric(df[final_cols['profit']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         rtp_raw = pd.to_numeric(df[final_cols['rtp']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         temp_df['派奖额'] = temp_df['销量'] * rtp_raw
 
@@ -78,71 +103,51 @@ def run_audit_engine(df, rules):
                 if rules['c_on'] and not (c <= rules['c_limit']): return None
                 if rules['p_on'] and not (rules['p_min'] <= p <= rules['p_max']): return None
                 if rules['r_on'] and not (rules['r_min'] <= r <= rules['r_max']): return None
-                return "手动命中"
-            else:
-                m = []
-                if 1000 <= v <= 2000 and c <= 12: m.append("疑似刷人数")
-                if v > 2000 and c <= 10: m.append("疑似对刷")
-                if v > 500000 and 0.995 <= r <= 1.005: m.append("高标刷量")
-                return " | ".join(m) if m else None
+                return "手动筛选"
+            m = []
+            if 1000 <= v <= 2000 and c <= 12: m.append("疑似刷人数")
+            if v > 2000 and c <= 10: m.append("疑似对刷")
+            if v >= 500000 and 0.995 <= r <= 1.000: m.append("疑似刷量")
+            if p >= 100000: m.append("盈利大会员")
+            return " | ".join(m) if m else None
 
         grouped['原因'] = grouped.apply(apply_logic, axis=1)
         return grouped[grouped['原因'].notna()].copy()
     except: return None
 
-# 5. 侧边栏 (控制台)
+# 5. 侧边栏
 with st.sidebar:
-    st.markdown("### ⚙️ 审计控制台")
-    st.info("💡 提示：点击左上角箭头可收起")
-    use_manual = st.toggle("🚀 启用手动自定义模式", value=False)
-    st.write("---")
-    v_on = st.toggle("按销量筛选", value=False); v_min = st.number_input("销量 Min", value=1000.0); v_max = st.number_input("销量 Max", value=2000.0)
-    st.write("---")
-    c_on = st.toggle("按单数筛选", value=False); c_limit = st.number_input("单数上限 (≤)", value=12)
-    st.write("---")
-    p_on = st.toggle("按盈亏筛选", value=False); p_min = st.number_input("盈亏 Min", value=-5000000.0); p_max = st.number_input("盈亏 Max", value=5000000.0)
-    st.write("---")
-    r_on = st.toggle("按RTP筛选", value=False); r_min = st.number_input("RTP Min", value=0.0, format="%.3f"); r_max = st.number_input("RTP Max", value=2.0, format="%.3f")
-    st.write("---")
-    manual_btn = st.button("✅ 立即应用筛选")
-
-    rules = {'use_manual': use_manual, 'v_on': v_on, 'v_min': v_min, 'v_max': v_max, 'c_on': c_on, 'c_limit': c_limit, 'p_on': p_on, 'p_min': p_min, 'p_max': p_max, 'r_on': r_on, 'r_min': r_min, 'r_max': r_max}
+    st.markdown("### ⚙️ 筛选控制台")
+    st.markdown("👈 **点左上角红方块收起/展开**")
+    use_manual = st.toggle("🚀 开启手动模式", value=False)
+    v_on = st.toggle("销量筛选", False); v_min = st.number_input("Min", 0.0); v_max = st.number_input("Max", 2000.0)
+    c_on = st.toggle("单数筛选", False); c_limit = st.number_input("单数 ≤", 12)
+    p_on = st.toggle("盈亏筛选", False); p_min = st.number_input("盈亏 Min", -1000000.0); p_max = st.number_input("盈亏 Max", 100000.0)
+    r_on = st.toggle("RTP筛选", False); r_min = st.number_input("RTP Min", 0.0); r_max = st.number_input("RTP Max", 1.0)
+    manual_btn = st.button("✅ 确定执行手动筛选")
+    rules = {'use_manual':use_manual, 'v_on':v_on, 'v_min':v_min, 'v_max':v_max, 'c_on':c_on, 'c_limit':c_limit, 'p_on':p_on, 'p_min':p_min, 'p_max':p_max, 'r_on':r_on, 'r_min':r_min, 'r_max':r_max}
 
 # 6. 主页面
 st.markdown("<div class='title-banner'><h1>📊 抓抓抓</h1></div>", unsafe_allow_html=True)
-
-# 状态提醒
-mode_str = "手动模式" if use_manual else "固定规则"
-st.markdown(f"<div class='status-box'>🟢 当前文件指纹：锁定读取 | 模式：{mode_str}</div>", unsafe_allow_html=True)
-
 file = st.file_uploader("📂 丢这边", type=["xlsx", "csv"])
 
 if file:
-    # --- 【核心改进：指纹校验】 ---
-    # 读取文件前几个字节生成唯一标识，确保换文件必刷新
-    current_file_hash = hashlib.md5(file.getvalue()).hexdigest()
-    
-    # 如果文件变了，或者点按钮了，或者模式切了，强制重跑
-    if st.session_state.get("file_hash") != current_file_hash or manual_btn:
+    current_hash = hashlib.md5(file.getvalue()).hexdigest()
+    if st.session_state.get("f_hash") != current_hash or manual_btn:
         raw = pd.read_excel(file) if file.name.endswith('.xlsx') else pd.read_csv(file)
         st.session_state.res_data = run_audit_engine(raw, rules)
-        st.session_state.file_hash = current_file_hash # 更新指纹
-        st.session_state.read_set = set() # 重置核查勾选
-        st.toast("🚀 侦测到新文件/新参数，数据已重载！")
+        st.session_state.f_hash = current_hash
+        st.session_state.read_set = set()
+        st.toast("✅ 数据已更新！")
 
     res = st.session_state.get("res_data")
     if res is not None and not res.empty:
-        # 排序
-        c_sort1, c_sort2, c_sort3 = st.columns([1, 2, 2])
-        c_sort1.markdown("<div style='padding-top:35px; font-weight:bold;'>数据排序:</div>", unsafe_allow_html=True)
-        sort_col = c_sort2.selectbox("排序字段", ["销量", "盈亏", "单数", "RTP"], index=0)
-        sort_order = c_sort3.selectbox("排序方式", ["由大到小", "由小到大"], index=0)
-        res = res.sort_values(by=sort_col, ascending=(sort_order == "由小到大"))
-
-        st.warning(f"🎯 扫描结果：共锁定 {len(res)} 个账号")
-
+        c1, c2, c3 = st.columns([1, 2, 2])
+        sort_col = c2.selectbox("排序字段", ["销量", "盈亏", "单数", "RTP"], index=0)
+        sort_ord = c3.selectbox("排序方式", ["由大到小", "由小到大"], index=0)
+        res = res.sort_values(by=sort_col, ascending=(sort_ord == "由小到大"))
+        
         st.markdown("""<div class='table-header'><div style='flex:0.8'>核查</div><div style='flex:2'>用户名</div><div style='flex:2.5'>原因</div><div style='flex:1.5'>销量</div><div style='flex:1.2'>单数</div><div style='flex:1.5'>盈亏</div><div style='flex:1.2'>RTP</div></div>""", unsafe_allow_html=True)
-
         with st.container(height=600):
             for i, row in res.iterrows():
                 u = row['用户名']
@@ -158,6 +163,6 @@ if file:
                 cols[5].markdown(f"<span style='{style}'>{row['盈亏']:,.0f}</span>", unsafe_allow_html=True)
                 cols[6].markdown(f"<span style='{style}'>{row['RTP']:.3f}</span>", unsafe_allow_html=True)
                 st.divider()
-        st.download_button("📥 导出当前结果", res.to_csv(index=False).encode('utf-8-sig'), "audit_report.csv")
+        st.download_button("📥 导出审计结果", res.to_csv(index=False).encode('utf-8-sig'), "audit_report.csv")
     elif res is not None:
         st.info("✅ 扫描完毕，未发现异常。")
