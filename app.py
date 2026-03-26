@@ -5,7 +5,7 @@ import hashlib
 # 1. 页面配置
 st.set_page_config(page_title="抓鬼专家", layout="wide")
 
-# 2. 极致美化 CSS
+# 2. 样式美化
 st.markdown("""
     <style>
     .stApp { background-color: #f8fafc; }
@@ -35,7 +35,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 3. 登录逻辑 (0224)
+# 3. 登录逻辑
 if "auth" not in st.session_state: st.session_state.auth = False
 if not st.session_state.auth:
     c1, c2, c3 = st.columns([1, 1.2, 1])
@@ -74,10 +74,12 @@ def run_audit_engine(df, rules):
         temp_df['盈亏'] = pd.to_numeric(df[final_cols['profit']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         temp_df['派奖额'] = temp_df['销量'] * pd.to_numeric(df[final_cols['rtp']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
 
+        # 自动汇总同名用户
         grouped = temp_df.groupby('用户名').agg({'销量':'sum','单数':'sum','盈亏':'sum','派奖额':'sum'}).reset_index()
         grouped['RTP'] = grouped.apply(lambda x: x['派奖额'] / x['销量'] if x['销量'] > 0 else 0, axis=1)
 
         is_manual = any([rules['v_on'], rules['c_on'], rules['p_on'], rules['r_on']])
+        
         def apply_logic(row):
             v, c, p, r = row['销量'], row['单数'], row['盈亏'], row['RTP']
             if is_manual:
@@ -85,49 +87,46 @@ def run_audit_engine(df, rules):
                 if rules['c_on'] and not (c <= rules['c_limit']): return None
                 if rules['p_on'] and not (rules['p_min'] <= p <= rules['p_max']): return None
                 if rules['r_on'] and not (rules['r_min'] <= r <= rules['r_max']): return None
-                return "筛选命中"
+                return "手动筛选"
             else:
                 m = []
-                if 1000 <= v <= 2100 and c < 12: m.append("疑似刷人数")
-                if v > 500000 and 0.995 <= r <= 1.005: m.append("疑似刷量")
-                if p > 100000: m.append("盈利大会员")
-                if v > 2000 and c < 10: m.append("疑似对刷")
+                # 老大要求的固定条件（全部改为小于等于）
+                if 1000 <= v <= 2000 and c <= 12: 
+                    m.append("疑似刷人数")
+                if v > 2000 and c <= 10: 
+                    m.append("疑似对刷")
+                
+                # 其他专家预设
+                if v > 500000 and 0.995 <= r <= 1.005: m.append("刷量嫌疑")
+                if p > 100000: m.append("盈利大户")
                 return " | ".join(m) if m else None
 
         grouped['原因'] = grouped.apply(apply_logic, axis=1)
         return grouped[grouped['原因'].notna()].copy()
     except: return None
 
-# 5. 侧边栏 - 全部改为手动输入
+# 5. 侧边栏
 with st.sidebar:
-    st.markdown("### 🛠️ 参数设定")
-    
-    # 销量
+    st.markdown("### 🛠️ 自定义过滤 (开启则覆盖固定条件)")
     v_on = st.toggle("销量过滤", False)
-    v_min = st.number_input("销量 Min", value=0.0, step=100.0)
-    v_max = st.number_input("销量 Max", value=10000000.0, step=100.0)
-    
+    v_min = st.number_input("销量下限", 0.0, step=100.0)
+    v_max = st.number_input("销量上限", 10000000.0, step=100.0)
     st.write("---")
-    # 单数
-    c_on = st.toggle("单数限制", False)
-    c_limit = st.number_input("单数上限 (≤)", value=12, step=1)
-    
+    c_on = st.toggle("单数过滤", False)
+    c_limit = st.number_input("单数应小于等于", 12, step=1)
     st.write("---")
-    # 盈亏
     p_on = st.toggle("盈亏过滤", False)
-    p_min = st.number_input("盈亏 Min", value=-5000000.0, step=1000.0)
-    p_max = st.number_input("盈亏 Max", value=5000000.0, step=1000.0)
-    
+    p_min = st.number_input("盈亏 Min", -5000000.0)
+    p_max = st.number_input("盈亏 Max", 5000000.0)
     st.write("---")
-    # RTP - 【关键改动：打字模式】
     r_on = st.toggle("RTP 过滤", False)
-    r_min = st.number_input("RTP Min (如0.99)", value=0.0, step=0.001, format="%.3f")
-    r_max = st.number_input("RTP Max (如1.01)", value=1.0, step=0.001, format="%.3f")
+    r_min = st.number_input("RTP Min", 0.0, format="%.3f")
+    r_max = st.number_input("RTP Max", 2.0, format="%.3f")
     
     rules = {'v_on':v_on,'v_min':v_min,'v_max':v_max,'c_on':c_on,'c_limit':c_limit,'p_on':p_on,'p_min':p_min,'p_max':p_max,'r_on':r_on,'r_min':r_min,'r_max':r_max}
 
 # 6. 主页面
-st.markdown("<div class='title-banner'><h1>📊 抓抓抓</h1><p>全参数打字录入 · 动态排序 · 自动汇总</p></div>", unsafe_allow_html=True)
+st.markdown("<div class='title-banner'><h1>📊 抓抓抓</h1><p>逻辑：1000-2000(≤12单) | >2000(≤10单)</p></div>", unsafe_allow_html=True)
 file = st.file_uploader("📂 丢这边", type=["xlsx", "csv"])
 
 if file:
@@ -137,22 +136,24 @@ if file:
             raw = pd.read_excel(file) if file.name.endswith('.xlsx') else pd.read_csv(file)
             st.session_state.res_data = run_audit_engine(raw, rules)
             st.session_state.read_set = set(); st.session_state.last_id = file_id
-        except: st.error("文件加载失败")
+        except: st.error("加载失败")
 
     res = st.session_state.get("res_data")
     if res is not None and not res.empty:
-        # 排序功能
+        # 排序
         with st.container():
             st.markdown("<div class='sort-bar'>", unsafe_allow_html=True)
-            sc1, sc2, sc3 = st.columns([1, 2, 2])
-            sort_target = sc2.selectbox("选择排序名目", ["销量", "盈亏", "单数", "RTP", "用户名"])
-            sort_order = sc3.selectbox("排序方式", ["从大到小", "从小到大"])
+            col1, col2, col3 = st.columns([1, 2, 2])
+            sort_by = col2.selectbox("排序字段", ["销量", "盈亏", "单_数", "RTP", "用户名"], index=0)
+            # 内部字段映射
+            s_map = {"销量":"销量", "盈亏":"盈亏", "单_数":"单数", "RTP":"RTP", "用户名":"用户名"}
+            order = col3.selectbox("顺序", ["大到小", "小到大"])
+            res = res.sort_values(by=s_map[sort_by], ascending=(order=="小到大"))
             st.markdown("</div>", unsafe_allow_html=True)
-            res = res.sort_values(by=sort_target, ascending=(sort_order == "从小到大"))
 
-        st.warning(f"🎯 扫描结果：共锁定 {len(res)} 个风险账号")
+        st.warning(f"🎯 命中异常账号：{len(res)} 个")
 
-        # 固定表头
+        # 表头
         st.markdown("""
             <div class='table-header'>
                 <div style='flex:0.8'>核查</div>
@@ -182,6 +183,6 @@ if file:
                 cols[5].markdown(f"<span style='{style}'>{row['盈亏']:,.0f}</span>", unsafe_allow_html=True)
                 cols[6].markdown(f"<span style='{style}'>{row['RTP']:.3f}</span>", unsafe_allow_html=True)
                 st.divider()
-        st.download_button("📥 导出排序后的报告", res.to_csv(index=False).encode('utf-8-sig'), "audit_report.csv")
+        st.download_button("📥 导出报告", res.to_csv(index=False).encode('utf-8-sig'), "report.csv")
     elif res is not None:
-        st.success("✅ 未发现异常")
+        st.success("✅ 扫描完毕，一切正常。")
