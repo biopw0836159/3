@@ -5,21 +5,33 @@ import hashlib
 # 1. 页面配置
 st.set_page_config(page_title="抓鬼专家", layout="wide")
 
-# 2. 极致美化 CSS
+# 2. 样式美化 (重点修改侧边栏颜色)
 st.markdown("""
     <style>
     .stApp { background-color: #f8fafc; }
-    /* 侧边栏巨型红色开关 */
+    
+    /* 【核心修改：侧边栏改为浅色，文字改为黑色】 */
+    [data-testid="stSidebar"] { 
+        background-color: #f1f5f9 !important; /* 浅灰蓝色底 */
+        min-width: 350px !important; 
+    }
+    /* 强行覆盖侧边栏所有文字颜色为深色 */
+    [data-testid="stSidebar"] .stMarkdown, 
+    [data-testid="stSidebar"] label, 
+    [data-testid="stSidebar"] p, 
+    [data-testid="stSidebar"] h3,
+    [data-testid="stSidebar"] .stToggle p { 
+        color: #1e293b !important; 
+        font-weight: 700 !important; 
+    }
+
+    /* 侧边栏巨型红色开关（保持不变） */
     [data-testid="collapsedControl"] {
         background-color: #ff4b4b !important; width: 130px !important; height: 48px !important;
         border-radius: 0 25px 25px 0 !important; top: 15px !important; color: white !important;
         box-shadow: 4px 4px 15px rgba(255, 75, 75, 0.5) !important;
     }
     [data-testid="collapsedControl"]::after { content: " ⚙️ 菜单开关"; font-size: 14px; font-weight: bold; color: white; }
-    [data-testid="stSidebar"] { background-color: #1e293b !important; min-width: 350px !important; }
-    
-    /* 登录框美化 */
-    .login-box { padding: 30px; background: white; border-radius: 15px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
     
     /* 统计看板 */
     .metric-card {
@@ -42,41 +54,28 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 3. 【重新焊死】登录逻辑 (0224)
+# 3. 登录逻辑 (0224)
 if "auth" not in st.session_state: st.session_state.auth = False
 if not st.session_state.auth:
     _, center_col, _ = st.columns([1, 1.2, 1])
     with center_col:
         st.markdown("<div style='height:100px'></div>", unsafe_allow_html=True)
-        st.markdown("<div class='login-box'>", unsafe_allow_html=True)
         st.title("🔐 欢迎光临")
         pwd = st.text_input("请输入访问密码", type="password")
         if st.button("进入系统", use_container_width=True):
-            if pwd == "0224": 
-                st.session_state.auth = True
-                st.rerun()
-            else: 
-                st.error("❌ 密码错误，拒绝访问")
-        st.markdown("</div>", unsafe_allow_html=True)
+            if pwd == "0224": st.session_state.auth = True; st.rerun()
+            else: st.error("❌ 密码错误")
     st.stop()
 
-# 4. 核心审计引擎
+# 4. 核心引擎 (保留所有条件：刷人数/刷量/盈利大户/对刷)
 def run_audit_engine(df, rules):
     try:
         df.columns = [str(c).strip() for c in df.columns]
-        mapping = {
-            'user': ['用户名', '账号', '会员'],
-            'vol': ['个人实际销量', '实际销量', '销量', '投注'],
-            'cnt': ['投注单数', '单数', '次数'],
-            'profit': ['个人游戏盈亏', '盈亏', '盈利'],
-            'bonus': ['奖金', '派奖', '中奖']
-        }
+        mapping = {'user':['用户名','账号','会员'],'vol':['销量','投注'],'cnt':['单数','次数'],'profit':['盈亏','盈利'],'bonus':['奖金','派奖','中奖']}
         final_cols = {}
         for k, aliases in mapping.items():
             for col in df.columns:
-                if any(a in col for a in aliases):
-                    final_cols[k] = col
-                    break
+                if any(a in col for a in aliases): final_cols[k] = col; break
         
         temp_df = pd.DataFrame()
         temp_df['用户名'] = df[final_cols['user']].astype(str)
@@ -86,7 +85,6 @@ def run_audit_engine(df, rules):
         temp_df['奖金'] = pd.to_numeric(df[final_cols['bonus']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
 
         grouped = temp_df.groupby('用户名').agg({'销量':'sum', '单数':'sum', '盈亏':'sum', '奖金':'sum'}).reset_index()
-        # RTP = 奖金 / 销量
         grouped['RTP'] = grouped.apply(lambda x: x['奖金'] / x['销量'] if x['销量'] > 0 else 0, axis=1)
 
         def apply_logic(row):
@@ -110,19 +108,20 @@ def run_audit_engine(df, rules):
         return grouped[grouped['原因'].notna()].copy()
     except: return None
 
-# 5. 侧边栏
+# 5. 侧边栏 (已改为浅色高亮)
 with st.sidebar:
     st.markdown("### ⚙️ 审计控制中心")
     use_manual = st.toggle("🚀 手动自定义模式", value=False)
-    v_on = st.toggle("销量筛选", False); v_min = st.number_input("Min", 0.0); v_max = st.number_input("Max", 2000.0)
+    st.write("---")
+    v_on = st.toggle("销量筛选", False); v_min = st.number_input("Min销量", 0.0); v_max = st.number_input("Max销量", 2000.0)
     c_on = st.toggle("单数限制", False); c_limit = st.number_input("单数 ≤", 12)
     p_on = st.toggle("盈亏限制", False); p_min = st.number_input("Min盈亏", 100000.0); p_max = st.number_input("Max盈亏", 1000000.0)
     r_on = st.toggle("RTP限制", False); r_min = st.number_input("Min RTP", 0.995, format="%.3f"); r_max = st.number_input("Max RTP", 1.000, format="%.3f")
-    manual_btn = st.button("🔥 执行自定义审计", type="primary")
+    manual_btn = st.button("🔥 执行审计", type="primary")
     rules = {'use_manual':use_manual, 'v_on':v_on, 'v_min':v_min, 'v_max':v_max, 'c_on':c_on, 'c_limit':c_limit, 'p_on':p_on, 'p_min':p_min, 'p_max':p_max, 'r_on':r_on, 'r_min':r_min, 'r_max':r_max}
 
 # 6. 主界面
-st.markdown("<div class='title-banner'><h1>📊 抓抓抓</h1><p>密码锁定版 | 实时异常统计看板已上线</p></div>", unsafe_allow_html=True)
+st.markdown("<div class='title-banner'><h1>📊 抓抓抓</h1></div>", unsafe_allow_html=True)
 file = st.file_uploader("📂 丢这边", type=["xlsx", "csv"])
 
 if file:
@@ -135,10 +134,10 @@ if file:
 
     res = st.session_state.get("res_data")
     if res is not None and not res.empty:
-        # --- 🚀 异常实况统计看板 ---
+        # --- 🚀 异常统计看板 ---
         st.markdown("### 🚨 异常捕获实况")
         k1, k2, k3, k4, k5 = st.columns(5)
-        k1.markdown(f"<div class='metric-card'><div class='metric-value'>{len(res)}</div><div class='metric-label'>锁定异常会员</div></div>", unsafe_allow_html=True)
+        k1.markdown(f"<div class='metric-card'><div class='metric-value'>{len(res)}</div><div class='metric-label'>锁定异常总数</div></div>", unsafe_allow_html=True)
         k2.markdown(f"<div class='metric-card'><div class='metric-value'>{len(res[res['原因'].str.contains('刷人数')])}</div><div class='metric-label'>疑似刷人数</div></div>", unsafe_allow_html=True)
         k3.markdown(f"<div class='metric-card'><div class='metric-value'>{len(res[res['原因'].str.contains('刷量')])}</div><div class='metric-label'>疑似刷量</div></div>", unsafe_allow_html=True)
         k4.markdown(f"<div class='metric-card'><div class='metric-value'>{len(res[res['原因'].str.contains('盈利')])}</div><div class='metric-label'>盈利大会员</div></div>", unsafe_allow_html=True)
@@ -150,7 +149,7 @@ if file:
         sort_dir = sc3.selectbox("排序顺序", ["由大到小", "由小到大"], index=0)
         res = res.sort_values(by=sort_col, ascending=(sort_dir == "由小到大"))
 
-        st.markdown("""<div class='table-header'><div style='flex:0.8'>核查</div><div style='flex:2'>用户名</div><div style='flex:2.5'>风险原因</div><div style='flex:1.5'>总销量</div><div style='flex:1.2'>单数</div><div style='flex:1.5'>总盈亏</div><div style='flex:1.2'>RTP</div></div>""", unsafe_allow_html=True)
+        st.markdown("""<div class='table-header'><div style='flex:0.8'>核查</div><div style='flex:2'>用户名</div><div style='flex:2.5'>原因</div><div style='flex:1.5'>总销量</div><div style='flex:1.2'>单数</div><div style='flex:1.5'>盈亏</div><div style='flex:1.2'>RTP</div></div>""", unsafe_allow_html=True)
         with st.container(height=500):
             for i, row in res.iterrows():
                 u = row['用户名']; is_read = u in st.session_state.read_set
