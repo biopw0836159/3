@@ -3,13 +3,13 @@ import pandas as pd
 import hashlib
 
 # 1. 页面配置
-st.set_page_config(page_title="财务抓鬼 V55", layout="wide")
+st.set_page_config(page_title="财务抓鬼 V57", layout="wide")
 
-# 2. 注入样式
+# 2. 注入样式 (浅色侧边栏 + 高亮文字)
 st.markdown("""
     <style>
     .stApp { background-color: #f8fafc; }
-    [data-testid="stSidebar"] { background-color: #f1f5f9 !important; min-width: 350px !important; }
+    [data-testid="stSidebar"] { background-color: #f1f5f9 !important; min-width: 400px !important; }
     [data-testid="stSidebar"] * { color: #0f172a !important; font-weight: 700 !important; }
     [data-testid="collapsedControl"] {
         background-color: #ff4b4b !important; width: 130px !important; height: 48px !important;
@@ -48,22 +48,20 @@ if not st.session_state.auth:
             else: st.error("❌ 密码错误")
     st.stop()
 
-# 4. 核心审计逻辑 (切换基准：派奖 -> 销量)
+# 4. 核心逻辑
 def run_strict_audit(df, cfg):
     try:
         df.columns = [str(c).strip() for c in df.columns]
-        last_col = df.columns[-1] 
+        last_col_name = df.columns[-1] 
         
         clean_df = pd.DataFrame()
         clean_df['用户名'] = df['用户名'].astype(str)
         
-        # 【重要修改】：此处不再抓“实际销量”，而是抓“个人派奖”作为销量的替代指标
-        # 即使数据偏移，只要能找到“个人派奖”这四个字就能抓准
         target_cols = ['个人充值手续费', '个人派奖', '个人自身返点/返水', '个人系统分红']
         for col in target_cols:
             clean_df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         
-        clean_df['盈亏'] = pd.to_numeric(df[last_col], errors='coerce').fillna(0)
+        clean_df['盈亏'] = pd.to_numeric(df[last_col_name], errors='coerce').fillna(0)
 
         grouped = clean_df.groupby('用户名').agg({
             '个人充值手续费': 'sum', '个人派奖': 'sum',
@@ -72,26 +70,32 @@ def run_strict_audit(df, cfg):
 
         def apply_rules(row):
             tags = []
-            fee, win, fs, fh = row['个人充值手续费'], row['个人派奖'], row['个人自身返点/返水'], row['个人系统分红']
+            fee, win, fs, fh, p = row['个人充值手续费'], row['个人派奖'], row['个人自身返点/返水'], row['个人系统分红'], row['盈亏']
             treatment = fs + fh
             
+            # 1. 待遇规则
             if treatment > cfg['limit_treatment']: 
-                tags.append(f"待遇过高(>{cfg['limit_treatment']/10000}万)")
+                tags.append(f"待遇过高(>{cfg['limit_treatment']})")
             
-            # 【文案修改】：倍数过高 -> 充销比过高
+            # 2. 充销比规则 (加入销量过滤逻辑)
             if win >= 1000 and fee > 0:
                 ratio = win / fee
+                # 只有销量超过设定的阈值，才跳出“充销比过高”的预警
                 if ratio > cfg['ratio_high'] and win > cfg['win_min']: 
                     tags.append(f"充销比过高(>{cfg['ratio_high']}倍)")
                 elif ratio < cfg['ratio_low'] and fee > 1000: 
                     tags.append("充销比偏低")
             
+            # 3. 无充值下注
             if fee == 0 and win > cfg['no_fee_limit']: 
-                tags.append("来源不明(无充值大额)")
+                tags.append("下注异常(无充值)")
+            
+            # 4. 盈亏大额 (强抓最后一列)
+            if p >= cfg['profit_limit']:
+                tags.append(f"盈利过大(>{cfg['profit_limit']})")
             
             return " | ".join(tags) if tags else None
 
-        # 将“个人派奖”直接作为“销量”展示
         grouped['原因'] = grouped.apply(apply_rules, axis=1)
         grouped['销量'] = grouped['个人派奖'] 
         grouped['充值'] = grouped['个人充值手续费']
@@ -100,25 +104,33 @@ def run_strict_audit(df, cfg):
         
         return grouped[grouped['原因'].notna()].copy()
     except Exception as e:
-        st.error(f"数据抓取失败。请确认表格包含：用户名、个人充值手续费、个人派奖。")
+        st.error(f"数据处理异常。请确认表格包含：用户名、个人充值手续费、个人派奖。且最后一列为盈亏。")
         return None
 
-# 5. 侧边栏
+# 5. 侧边栏：文案精准优化
 with st.sidebar:
     st.markdown("### 🛠️ 财务参数自定义")
-    l_treat = st.number_input("待遇预警线", value=50000)
-    l_ratio_h = st.number_input("充销比预警 (高)", value=50.0)
-    l_win_min = st.number_input("触发金额 (派奖基准)", value=30000)
-    l_ratio_l = st.number_input("充销比预警 (低)", value=2.0)
-    l_no_fee = st.number_input("无充值派奖预警", value=200000)
+    l_treat = st.number_input("返点+工资超过多少", value=50000)
+    l_ratio_h = st.number_input("充销比 (高) 多少", value=50.0)
+    
+    # 老大，按您的要求改名了，并加上了说明
+    l_win_min = st.number_input("销量需超过多少才需跳异常", value=30000, help="预防充值10块下500块的无意义会员干扰")
+    
+    l_ratio_l = st.number_input("充销比 (低) 多少", value=2.0)
+    l_no_fee = st.number_input("无充值但下注超过多少", value=200000)
+    l_profit = st.number_input("盈亏超过多少(大额盈利)", value=100000)
     st.write("---")
-    audit_btn = st.button("🔥 重新同步派奖数据", type="primary")
+    audit_btn = st.button("🔥 立即同步数据", type="primary")
 
-    config = {'limit_treatment': l_treat, 'ratio_high': l_ratio_h, 'win_min': l_win_min, 'ratio_low': l_ratio_l, 'no_fee_limit': l_no_fee}
+    config = {
+        'limit_treatment': l_treat, 'ratio_high': l_ratio_h, 
+        'win_min': l_win_min, 'ratio_low': l_ratio_l, 
+        'no_fee_limit': l_no_fee, 'profit_limit': l_profit
+    }
 
 # 6. 主界面
-st.markdown("<div class='title-banner'><h1>📊 财务抓鬼盈亏审计 V55</h1><p>数据基准：已切换至【个人派奖】防止列偏移错误</p></div>", unsafe_allow_html=True)
-file = st.file_uploader("📂 上传财务明细 (Excel)", type=["xlsx"])
+st.markdown("<div class='title-banner'><h1>📊 财务抓鬼审计 V57</h1></div>", unsafe_allow_html=True)
+file = st.file_uploader("📂 上传财务明细 Excel", type=["xlsx"])
 
 if file:
     f_hash = hashlib.md5(file.getvalue()).hexdigest()
@@ -132,18 +144,18 @@ if file:
     if res is not None and not res.empty:
         # 看板
         k1, k2, k3, k4 = st.columns(4)
-        k1.markdown(f"<div class='metric-card'><div class='metric-value'>{len(res)}</div><div class='metric-label'>财务异常总数</div></div>", unsafe_allow_html=True)
-        k2.markdown(f"<div class='metric-card'><div class='metric-value'>{len(res[res['原因'].str.contains('待遇')])}</div><div class='metric-label'>待遇异常</div></div>", unsafe_allow_html=True)
+        k1.markdown(f"<div class='metric-card'><div class='metric-value'>{len(res)}</div><div class='metric-label'>锁定财务异常</div></div>", unsafe_allow_html=True)
+        k2.markdown(f"<div class='metric-card'><div class='metric-value'>{len(res[res['原因'].str.contains('盈利')])}</div><div class='metric-label'>大额盈利</div></div>", unsafe_allow_html=True)
         k3.markdown(f"<div class='metric-card'><div class='metric-value'>{len(res[res['原因'].str.contains('充销比')])}</div><div class='metric-label'>充销比异常</div></div>", unsafe_allow_html=True)
-        k4.markdown(f"<div class='metric-card'><div class='metric-value'>{len(res[res['原因'].str.contains('来源')])}</div><div class='metric-label'>无充值大额派奖</div></div>", unsafe_allow_html=True)
+        k4.markdown(f"<div class='metric-card'><div class='metric-value'>{len(res[res['原因'].str.contains('待遇')])}</div><div class='metric-label'>返点工资预警</div></div>", unsafe_allow_html=True)
         
         st.write("---")
         sc1, sc2, sc3 = st.columns([1, 2, 2])
-        sort_col = sc2.selectbox("排序字段", ["销量", "充值", "充销比", "待遇", "盈亏"], index=2)
+        sort_col = sc2.selectbox("排序字段", ["销量", "充值", "充销比", "待遇", "盈亏"], index=4)
         sort_dir = sc3.selectbox("排序顺序", ["由大到小", "由小到大"], index=0)
         res = res.sort_values(by=sort_col, ascending=(sort_dir == "由小到大"))
 
-        st.markdown("""<div class='table-header'><div style='flex:0.8'>确认</div><div style='flex:1.5'>用户名</div><div style='flex:2.5'>审计结论</div><div style='flex:1.2'>销量(派奖)</div><div style='flex:1.2'>充值</div><div style='flex:1.2'>充销比</div><div style='flex:1.2'>待遇</div><div style='flex:1.2'>盈亏</div></div>""", unsafe_allow_html=True)
+        st.markdown("""<div class='table-header'><div style='flex:0.8'>确认</div><div style='flex:1.5'>用户名</div><div style='flex:2.5'>异常结论</div><div style='flex:1.2'>销量(派奖)</div><div style='flex:1.2'>充值</div><div style='flex:1.2'>比值</div><div style='flex:1.2'>返点工资</div><div style='flex:1.2'>盈亏</div></div>""", unsafe_allow_html=True)
         with st.container(height=500):
             for i, row in res.iterrows():
                 u = row['用户名']; is_read = u in st.session_state.read_set
@@ -159,4 +171,4 @@ if file:
                 cols[6].markdown(f"<span style='{style}'>{row['待遇']:,.1f}</span>", unsafe_allow_html=True)
                 cols[7].markdown(f"<span style='{style}'>{row['盈亏']:,.1f}</span>", unsafe_allow_html=True)
                 st.divider()
-        st.download_button("📥 导出审计结果", res.to_csv(index=False).encode('utf-8-sig'), "finance_audit_fixed.csv")
+        st.download_button("📥 导出审计结果", res.to_csv(index=False).encode('utf-8-sig'), "finance_audit_v57.csv")
