@@ -18,16 +18,20 @@ st.markdown("""
         padding: 25px; border-radius: 15px; color: white; text-align: center; 
         margin-bottom: 25px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
     }
-    /* 表头样式 */
     .table-header {
-        background-color: #e2e8f0; padding: 10px; border-radius: 8px;
+        background-color: #e2e8f0; padding: 12px 10px; border-radius: 8px;
         font-weight: bold; color: #475569; margin-bottom: 10px;
-        display: flex; align-items: center;
+        display: flex; align-items: center; font-size: 14px;
     }
     .badge {
         background-color: #fee2e2; color: #ef4444;
         padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: bold;
         border: 1px solid #fecaca;
+    }
+    /* 排序控件区 */
+    .sort-bar {
+        background: white; padding: 15px; border-radius: 10px; 
+        margin-bottom: 15px; border: 1px solid #e2e8f0;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -71,7 +75,7 @@ def run_audit_engine(df, rules):
         temp_df['盈亏'] = pd.to_numeric(df[final_cols['profit']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         temp_df['派奖额'] = temp_df['销量'] * pd.to_numeric(df[final_cols['rtp']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
 
-        # 合并重复用户
+        # 汇总同名用户
         grouped = temp_df.groupby('用户名').agg({'销量':'sum','单数':'sum','盈亏':'sum','派奖额':'sum'}).reset_index()
         grouped['RTP'] = grouped.apply(lambda x: x['派奖额'] / x['销量'] if x['销量'] > 0 else 0, axis=1)
 
@@ -83,10 +87,10 @@ def run_audit_engine(df, rules):
                 if rules['c_on'] and not (c <= rules['c_limit']): return None
                 if rules['p_on'] and not (rules['p_min'] <= p <= rules['p_max']): return None
                 if rules['r_on'] and not (rules['r_min'] <= r <= rules['r_max']): return None
-                return "手动筛选"
+                return "筛选命中"
             else:
                 m = []
-                if 1000 <= v <= 2000 and c < 12: m.append("疑似刷人数")
+                if 1000 <= v <= 2100 and c < 12: m.append("疑似刷人数")
                 if v > 500000 and 0.995 <= r <= 1.005: m.append("疑似刷量")
                 if p > 100000: m.append("盈利大会员")
                 if v > 2000 and c < 10: m.append("疑似对刷")
@@ -99,17 +103,23 @@ def run_audit_engine(df, rules):
 # 5. 侧边栏
 with st.sidebar:
     st.markdown("### 🛠️ 参数设定")
-    v_on = st.toggle("销量过滤", False); v_min = st.number_input("Min", 1000.0); v_max = st.number_input("Max", 10000000.0)
+    v_on = st.toggle("销量过滤", False)
+    v_min = st.number_input("销量 Min", value=0.0, step=100.0)
+    v_max = st.number_input("销量 Max", value=10000000.0, step=100.0)
     st.write("---")
-    c_on = st.toggle("单数限制", False); c_limit = st.number_input("上限 ≤", 12)
+    c_on = st.toggle("单数限制", False)
+    c_limit = st.number_input("单数上限 (≤)", value=12, step=1)
     st.write("---")
-    p_on = st.toggle("盈亏过滤", False); p_min = st.number_input("盈亏 Min", -1000000.0); p_max = st.number_input("盈亏 Max", 1000000.0)
+    p_on = st.toggle("盈亏过滤", False)
+    p_min = st.number_input("盈亏 Min", value=-5000000.0, step=1000.0)
+    p_max = st.number_input("盈亏 Max", value=5000000.0, step=1000.0)
     st.write("---")
-    r_on = st.toggle("RTP 过滤", False); r_val = st.slider("RTP 范围", 0.0, 2.0, (0.0, 1.0))
+    r_on = st.toggle("RTP 过滤", False)
+    r_val = st.slider("RTP 范围", 0.0, 5.0, (0.0, 1.0), step=0.01)
     rules = {'v_on':v_on,'v_min':v_min,'v_max':v_max,'c_on':c_on,'c_limit':c_limit,'p_on':p_on,'p_min':p_min,'p_max':p_max,'r_on':r_on,'r_min':r_val[0],'r_max':r_val[1]}
 
 # 6. 主页面
-st.markdown("<div class='title-banner'><h1>📊 抓鬼抓抓抓</h1><p>已锁定固定表头 · 自动汇总</p></div>", unsafe_allow_html=True)
+st.markdown("<div class='title-banner'><h1>📊 风险审计平台 V38</h1><p>已启用：动态排序 · 自动汇总 · 固定名目</p></div>", unsafe_allow_html=True)
 file = st.file_uploader("📂 丢这边", type=["xlsx", "csv"])
 
 if file:
@@ -123,10 +133,21 @@ if file:
 
     res = st.session_state.get("res_data")
     if res is not None and not res.empty:
-        st.warning(f"🎯 发现 {len(res)} 个风险账号")
-        res = res.sort_values(by="销量", ascending=False)
+        # --- 排序功能区 ---
+        with st.container():
+            st.markdown("<div class='sort-bar'>", unsafe_allow_html=True)
+            sc1, sc2, sc3 = st.columns([1, 2, 2])
+            sort_target = sc2.selectbox("选择排序名目", ["销量", "盈亏", "单数", "RTP", "用户名"])
+            sort_order = sc3.selectbox("排序方式", ["从大到小", "从小到大"])
+            st.markdown("</div>", unsafe_allow_html=True)
+            
+            # 执行排序
+            is_asc = (sort_order == "从小到大")
+            res = res.sort_values(by=sort_target, ascending=is_asc)
 
-        # --- 【关键：固定名目表头】 ---
+        st.warning(f"🎯 扫描结果：共锁定 {len(res)} 个风险账号")
+
+        # --- 固定表头 ---
         st.markdown("""
             <div class='table-header'>
                 <div style='flex:0.8'>核查</div>
@@ -139,11 +160,11 @@ if file:
             </div>
         """, unsafe_allow_html=True)
 
+        # --- 数据列表 ---
         with st.container(height=600):
             for i, row in res.iterrows():
                 u = row['用户名']
                 is_read = u in st.session_state.read_set
-                # 使用与表头一致的列宽比例
                 cols = st.columns([0.8, 2, 2.5, 1.5, 1.2, 1.5, 1.2])
                 
                 if cols[0].checkbox(" ", key=f"k_{u}_{i}", value=is_read):
@@ -151,7 +172,6 @@ if file:
                 else: st.session_state.read_set.discard(u)
 
                 style = "color:#94a3b8; text-decoration:line-through;" if is_read else "color:#1e293b;"
-                
                 cols[1].markdown(f"<span style='{style}'>{u}</span>", unsafe_allow_html=True)
                 cols[2].markdown(f"<span class='badge'>{row['原因']}</span>", unsafe_allow_html=True)
                 cols[3].markdown(f"<span style='{style}'>{row['销量']:,.0f}</span>", unsafe_allow_html=True)
@@ -160,6 +180,6 @@ if file:
                 cols[6].markdown(f"<span style='{style}'>{row['RTP']:.3f}</span>", unsafe_allow_html=True)
                 st.divider()
         
-        st.download_button("📥 导出报告", res.to_csv(index=False).encode('utf-8-sig'), "audit_report.csv")
+        st.download_button("📥 导出排序后的报告", res.to_csv(index=False).encode('utf-8-sig'), "audit_report_sorted.csv")
     elif res is not None:
         st.success("✅ 未发现异常")
