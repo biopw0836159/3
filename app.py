@@ -41,4 +41,127 @@ st.markdown("""
     }
     
     .title-banner {
-        background: linear-gradient(135deg,
+        background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
+        padding: 20px; border-radius: 12px; color: white; text-align: center; margin-bottom: 20px;
+    }
+    .table-header {
+        background-color: #e2e8f0; padding: 12px 10px; border-radius: 8px;
+        font-weight: bold; color: #475569; margin-bottom: 10px; display: flex; align-items: center;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# 3. 登录逻辑 (0224)
+if "auth" not in st.session_state: st.session_state.auth = False
+if not st.session_state.auth:
+    _, center_col, _ = st.columns([1, 1.2, 1])
+    with center_col:
+        st.markdown("<div style='height:100px'></div>", unsafe_allow_html=True)
+        st.title("🔐 财务审计登录")
+        pwd = st.text_input("请输入访问密码", type="password")
+        if st.button("进入系统", use_container_width=True):
+            if pwd == "0224": st.session_state.auth = True; st.rerun()
+            else: st.error("❌ 密码错误")
+    st.stop()
+
+# 4. 核心审计函数
+def run_strict_audit(df, cfg):
+    try:
+        df.columns = [str(c).strip() for c in df.columns]
+        last_col = df.columns[-1]
+        clean_df = pd.DataFrame()
+        clean_df['用户名'] = df['用户名'].astype(str)
+        target_cols = ['个人充值手续费', '个人派奖', '个人自身返点/返水', '个人系统分红']
+        for col in target_cols:
+            clean_df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        clean_df['盈亏'] = pd.to_numeric(df[last_col], errors='coerce').fillna(0)
+
+        grouped = clean_df.groupby('用户名').agg({
+            '个人充值手续费': 'sum', '个人派奖': 'sum',
+            '个人自身返点/返水': 'sum', '个人系统分红': 'sum', '盈亏': 'sum'
+        }).reset_index()
+
+        def apply_rules(row):
+            tags = []
+            fee, win, fs, fh, p = row['个人充值手续费'], row['个人派奖'], row['个人自身返点/返水'], row['个人系统分红'], row['盈亏']
+            treatment = fs + fh
+            if treatment > cfg['limit_treatment']: tags.append(f"待遇过高(>{cfg['limit_treatment']})")
+            if win >= 1000 and fee > 0:
+                ratio = win / fee
+                if ratio > cfg['ratio_high'] and win > cfg['win_min']: tags.append(f"充销比过高(>{cfg['ratio_high']}倍)")
+                elif ratio < cfg['ratio_low'] and fee > 1000: tags.append("充销比偏低")
+            if fee == 0 and win > cfg['no_fee_limit']: tags.append("下注异常(无充值)")
+            if p >= cfg['profit_limit']: tags.append(f"盈利过大(>{cfg['profit_limit']})")
+            return " | ".join(tags) if tags else None
+
+        grouped['原因'] = grouped.apply(apply_rules, axis=1)
+        grouped['销量'] = grouped['个人派奖'] 
+        grouped['充值'] = grouped['个人充值手续费']
+        grouped['待遇'] = grouped['个人自身返点/返水'] + grouped['个人系统分红']
+        grouped['充销比'] = grouped.apply(lambda x: x['销量']/x['充值'] if x['充值']>0 else 0, axis=1)
+        return grouped[grouped['原因'].notna()].copy()
+    except Exception: return None
+
+# 5. 侧边栏：强化提示语
+with st.sidebar:
+    st.markdown("### 🛠️ 财务参数自定义")
+    l_treat = st.number_input("返点+工资超过多少", value=50000)
+    
+    l_ratio_h = st.number_input("充销比 (高) 多少", value=50.0)
+    
+    # 重点修复处：显化提醒文字
+    l_win_min = st.number_input("销量需超过多少才需跳异常", value=30000)
+    st.markdown("<span class='sidebar-hint'>💡 预防充值10块下500块的无意义会员干扰</span>", unsafe_allow_html=True)
+    
+    l_ratio_l = st.number_input("充销比 (低) 多少", value=2.0)
+    l_no_fee = st.number_input("无充值但下注超过多少", value=200000)
+    l_profit = st.number_input("盈亏超过多少(大额盈利)", value=100000)
+    
+    st.write("---")
+    audit_btn = st.button("🔥 立即同步数据", type="primary")
+    config = {'limit_treatment': l_treat, 'ratio_high': l_ratio_h, 'win_min': l_win_min, 'ratio_low': l_ratio_l, 'no_fee_limit': l_no_fee, 'profit_limit': l_profit}
+
+# 6. 主界面
+st.markdown("<div class='title-banner'><h1>📊 财务抓鬼审计 V59</h1></div>", unsafe_allow_html=True)
+file = st.file_uploader("📂 上传财务明细 Excel", type=["xlsx"])
+
+if file:
+    f_hash = hashlib.md5(file.getvalue()).hexdigest()
+    if st.session_state.get("f_hash") != f_hash or audit_btn:
+        raw_data = pd.read_excel(file)
+        st.session_state.res_data = run_strict_audit(raw_data, config)
+        st.session_state.f_hash = f_hash
+        st.session_state.read_set = set()
+
+    res = st.session_state.get("res_data")
+    if res is not None and not res.empty:
+        # 统计
+        k1, k2, k3, k4 = st.columns(4)
+        k1.markdown(f"<div class='metric-card'><div class='metric-value'>{len(res)}</div><div>总异常</div></div>", unsafe_allow_html=True)
+        k2.markdown(f"<div class='metric-card'><div class='metric-value'>{len(res[res['原因'].str.contains('盈利')])}</div><div>盈利大户</div></div>", unsafe_allow_html=True)
+        k3.markdown(f"<div class='metric-card'><div class='metric-value'>{len(res[res['原因'].str.contains('充销比')])}</div><div>比值异常</div></div>", unsafe_allow_html=True)
+        k4.markdown(f"<div class='metric-card'><div class='metric-value'>{len(res[res['原因'].str.contains('待遇')])}</div><div>待遇过高</div></div>", unsafe_allow_html=True)
+        
+        st.write("---")
+        # 排序
+        sc2 = st.columns([1, 2, 2])[1]
+        sort_col = sc2.selectbox("排序字段", ["销量", "充值", "充销比", "待遇", "盈亏"], index=4)
+        res = res.sort_values(by=sort_col, ascending=False)
+
+        st.markdown("""<div class='table-header'><div style='flex:0.8'>确认</div><div style='flex:1.5'>用户名</div><div style='flex:3'>异常结论 (大号字体)</div><div style='flex:1.2'>销量</div><div style='flex:1.2'>充值</div><div style='flex:1.2'>比值</div><div style='flex:1.2'>待遇</div><div style='flex:1.2'>盈亏</div></div>""", unsafe_allow_html=True)
+        with st.container(height=500):
+            for i, row in res.iterrows():
+                u = row['用户名']; is_read = u in st.session_state.read_set
+                cols = st.columns([0.8, 1.5, 3, 1.2, 1.2, 1.2, 1.2, 1.2])
+                if cols[0].checkbox(" ", key=f"f_{u}_{i}", value=is_read): st.session_state.read_set.add(u)
+                else: st.session_state.read_set.discard(u)
+                style = "color:#94a3b8; text-decoration:line-through;" if is_read else "color:#1e293b;"
+                cols[1].markdown(f"<span style='{style}'>{u}</span>", unsafe_allow_html=True)
+                cols[2].markdown(f"<span class='badge-giant'>{row['原因']}</span>", unsafe_allow_html=True)
+                cols[3].markdown(f"<span style='{style}'>{row['销量']:,.1f}</span>", unsafe_allow_html=True)
+                cols[4].markdown(f"<span style='{style}'>{row['充值']:,.1f}</span>", unsafe_allow_html=True)
+                cols[5].markdown(f"<span style='{style}'>{row['充销比']:.2f}</span>", unsafe_allow_html=True)
+                cols[6].markdown(f"<span style='{style}'>{row['待遇']:,.1f}</span>", unsafe_allow_html=True)
+                cols[7].markdown(f"<span style='{style}'>{row['盈亏']:,.1f}</span>", unsafe_allow_html=True)
+                st.divider()
+        st.download_button("📥 导出审计结果", res.to_csv(index=False).encode('utf-8-sig'), "finance_audit_v59.csv")
