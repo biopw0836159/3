@@ -2,56 +2,42 @@ import streamlit as st
 import pandas as pd
 import hashlib
 
-# 1. 页面配置 (合用一个配置)
+# 1. 页面配置
 st.set_page_config(page_title="抓鬼专家", layout="wide")
 
-# 2. 样式注入 (合并两者的 CSS)
+# 2. 注入样式 (保持所有名目与颜色)
 st.markdown("""
     <style>
     .stApp { background-color: #f8fafc; }
-    [data-testid="stSidebar"] { background-color: #f1f5f9 !important; min-width: 420px !important; }
-    [data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] label, [data-testid="stSidebar"] p, 
-    [data-testid="stSidebar"] h3, [data-testid="stSidebar"] .stToggle p { 
+    [data-testid="stSidebar"] { background-color: #f1f5f9 !important; min-width: 400px !important; }
+    [data-testid="stSidebar"] label, [data-testid="stSidebar"] p, [data-testid="stSidebar"] h3 { 
         color: #1e293b !important; font-weight: 700 !important; 
     }
-    .sidebar-hint { color: #ef4444 !important; font-size: 11px !important; font-weight: 600; margin-top: -5px; margin-bottom: 10px; display: block; }
-    .range-label { font-size: 13px; color: #1e293b; font-weight: bold; margin-bottom: 2px; }
-    
     .metric-card {
         background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); 
         border-bottom: 4px solid #ef4444; text-align: center; margin-bottom: 10px;
     }
     .metric-value { font-size: 32px; font-weight: 900; color: #ef4444; }
-    .metric-label { font-size: 13px; color: #64748b; font-weight: 600; }
     .badge-giant { background: #fee2e2; color: #ef4444; padding: 5px 12px; border-radius: 8px; font-weight: 900; font-size: 16px; border: 2px solid #fecaca; display: inline-block; }
     .badge-red { background: #fee2e2; color: #ef4444; padding: 2px 8px; border-radius: 6px; font-weight: bold; border: 1px solid #fecaca; }
     .title-banner { background: linear-gradient(135deg, #1e293b 0%, #334155 100%); padding: 20px; border-radius: 12px; color: white; text-align: center; margin-bottom: 20px; }
     .table-header { background-color: #e2e8f0; padding: 12px 10px; border-radius: 8px; font-weight: bold; color: #475569; margin-bottom: 10px; display: flex; align-items: center; }
-    
-    /* 巨型开关 */
-    [data-testid="collapsedControl"] {
-        background-color: #ff4b4b !important; width: 130px !important; height: 48px !important;
-        border-radius: 0 25px 25px 0 !important; top: 15px !important; color: white !important;
-        box-shadow: 4px 4px 15px rgba(255, 75, 75, 0.5) !important;
-    }
-    [data-testid="collapsedControl"]::after { content: " ⚙️ 菜单开关"; font-size: 14px; font-weight: bold; color: white; }
     </style>
     """, unsafe_allow_html=True)
 
-# 3. 登录逻辑 (统一登录)
+# 3. 登录逻辑 (0224)
 if "auth" not in st.session_state: st.session_state.auth = False
 if not st.session_state.auth:
     _, center_col, _ = st.columns([1, 1.2, 1])
     with center_col:
-        st.title("🔐 审计系统登录")
+        st.title("🔐 欢迎光临")
         pwd = st.text_input("请输入访问密码", type="password")
         if st.button("进入系统"):
             if pwd == "0224": st.session_state.auth = True; st.rerun()
-            else: st.error("❌ 密码错误")
     st.stop()
 
-# --- 核心引擎定义 (保持原样) ---
-def run_audit_engine_1(df, rules):
+# --- 核心引擎 (原封不动) ---
+def engine_lottery(df, rules):
     try:
         df.columns = [str(c).strip() for c in df.columns]
         mapping = {'user':['用户名','账号','会员'],'vol':['销量','投注'],'cnt':['单数','次数'],'profit':['盈亏','盈利'],'bonus':['奖金','派奖','中奖']}
@@ -86,7 +72,7 @@ def run_audit_engine_1(df, rules):
         return grouped[grouped['原因'].notna()].copy()
     except: return None
 
-def run_strict_audit_2(df, cfg):
+def engine_profit(df, cfg):
     try:
         df.columns = [str(c).strip() for c in df.columns]
         last_col = df.columns[-1]
@@ -111,92 +97,59 @@ def run_strict_audit_2(df, cfg):
             if cfg['sw5'] and p >= cfg['profit_limit']: tags.append("盈利过大")
             return " | ".join(tags) if tags else None
         grouped['原因'] = grouped.apply(apply_rules, axis=1)
-        grouped['销量'] = grouped['个人派奖']
-        grouped['充值'] = grouped['个人充值手续费']
+        grouped['销量'] = grouped['个人派奖']; grouped['充值'] = grouped['个人充值手续费']
         grouped['待遇'] = grouped['个人自身返点/返水'] + grouped['个人系统分红']
         grouped['充销比'] = grouped.apply(lambda x: x['销量']/x['充值'] if x['充值']>0 else 0, axis=1)
         return grouped[grouped['原因'].notna()].copy()
-    except Exception: return None
+    except: return None
 
-# 4. 侧边栏及主逻辑
-tab1, tab2 = st.tabs(["🚀 日常快抓 (抓鬼专家)", "📊 深度财务 (抓鬼专家2)"])
+# 4. 标签页逻辑
+tab_a, tab_b = st.tabs(["🚀 用户彩票分析", "📊 盈亏排行"])
 
-# --- 逻辑 1 ---
-with tab1:
+# --- [分页 A: 用户彩票分析] ---
+with tab_a:
     with st.sidebar:
-        st.markdown("### ⚙️ [快抓模式] 审计控制")
-        use_manual_1 = st.toggle("🚀 手动自定义模式", value=False, key="t1_man")
-        v_on_1 = st.toggle("销量筛选", False, key="t1_v_on"); v_min_1 = st.number_input("Min销量", 0.0, key="t1_v_min"); v_max_1 = st.number_input("Max销量", 2000.0, key="t1_v_max")
-        c_on_1 = st.toggle("单数限制", False, key="t1_c_on"); c_limit_1 = st.number_input("单数 ≤", 12, key="t1_c_lim")
-        p_on_1 = st.toggle("盈亏限制", False, key="t1_p_on"); p_min_1 = st.number_input("Min盈亏", 100000.0, key="t1_p_min"); p_max_1 = st.number_input("Max盈亏", 1000000.0, key="t1_p_max")
-        r_on_1 = st.toggle("RTP限制", False, key="t1_r_on"); r_min_1 = st.number_input("Min RTP", 0.995, format="%.3f", key="t1_r_min"); r_max_1 = st.number_input("Max RTP", 1.000, format="%.3f", key="t1_r_max")
-        btn_1 = st.button("🔥 执行快抓审计", type="primary", key="btn1")
-        rules_1 = {'use_manual':use_manual_1, 'v_on':v_on_1, 'v_min':v_min_1, 'v_max':v_max_1, 'c_on':c_on_1, 'c_limit':c_limit_1, 'p_on':p_on_1, 'p_min':p_min_1, 'p_max':p_max_1, 'r_on':r_on_1, 'r_min':r_min_1, 'r_max':r_max_1}
+        st.markdown("### ⚙️ [彩票分析] 筛选")
+        use_manual_a = st.toggle("🚀 手动自定义模式", value=False, key="ma")
+        v_on_a = st.toggle("销量筛选", False, key="va"); v_min_a = st.number_input("Min销量", 0.0, key="vmina"); v_max_a = st.number_input("Max销量", 2000.0, key="vmaxa")
+        c_on_a = st.toggle("单数限制", False, key="ca"); c_limit_a = st.number_input("单数 ≤", 12, key="clima")
+        p_on_a = st.toggle("盈亏限制", False, key="pa"); p_min_a = st.number_input("Min盈亏", 100000.0, key="pmina"); p_max_a = st.number_input("Max盈亏", 1000000.0, key="pmaxa")
+        r_on_a = st.toggle("RTP限制", False, key="ra"); r_min_a = st.number_input("Min RTP", 0.995, format="%.3f", key="rmina"); r_max_a = st.number_input("Max RTP", 1.000, format="%.3f", key="rmaxa")
+        btn_a = st.button("🔥 执行分析", type="primary", key="btna")
+        rules_a = {'use_manual':use_manual_a, 'v_on':v_on_a, 'v_min':v_min_a, 'v_max':v_max_a, 'c_on':c_on_a, 'c_limit':c_limit_a, 'p_on':p_on_a, 'p_min':p_min_a, 'p_max':p_max_a, 'r_on':r_on_a, 'r_min':r_min_a, 'r_max':r_max_a}
 
-    st.markdown("<div class='title-banner'><h1>📊 抓鬼专家 - 快抓引擎</h1></div>", unsafe_allow_html=True)
-    f1 = st.file_uploader("📂 丢这边 (快抓)", type=["xlsx", "csv"], key="f1")
-    if f1:
-        if btn_1: 
-            raw = pd.read_excel(f1) if f1.name.endswith('.xlsx') else pd.read_csv(f1)
-            st.session_state.res1 = run_audit_engine_1(raw, rules_1)
-        res1 = st.session_state.get("res1")
-        if res1 is not None and not res1.empty:
-            k1, k2, k3, k4, k5 = st.columns(5)
-            k1.markdown(f"<div class='metric-card'><div class='metric-value'>{len(res1)}</div><div class='metric-label'>锁定总数</div></div>", unsafe_allow_html=True)
-            # ... 此处省略统计逻辑保持原样显示 ...
-            st.write("---")
-            sc_col, sc_dir = st.columns([2,2])[0], st.columns([2,2])[1]
-            s_c = st.selectbox("排序字段", ["销量", "盈亏", "单数", "RTP"], key="s1")
-            s_d = st.selectbox("排序方向", ["由大到小", "由小到大"], key="d1")
-            res1 = res1.sort_values(by=s_c, ascending=(s_d=="由小到大"))
-            st.dataframe(res1, use_container_width=True) # 简化显示，或保持您原来的列渲染逻辑
+    st.markdown("<div class='title-banner'><h1>📊 用户彩票分析</h1></div>", unsafe_allow_html=True)
+    f_a = st.file_uploader("📂 丢这边 ", type=["xlsx", "csv"], key="fa")
+    if f_a:
+        if btn_a: st.session_state.ra = engine_lottery(pd.read_excel(f_a) if f_a.name.endswith('.xlsx') else pd.read_csv(f_a), rules_a)
+        res_a = st.session_state.get("ra")
+        if res_a is not None and not res_a.empty:
+            st.dataframe(res_a, use_container_width=True)
 
-# --- 逻辑 2 ---
-with tab2:
+# --- [分页 B: 盈亏排行] ---
+with tab_b:
     with st.sidebar:
-        st.markdown("### 🛠️ [深度模式] 维度勾选")
-        sw1 = st.checkbox("🔍 充销比(高)审计", value=True, key="sw1")
-        if sw1:
-            l_ratio_h = st.number_input("充销比(高)", value=50.0, key="r_h")
-            c1, c2 = st.columns(2)
-            l_win_min = c1.number_input("销量(小)", value=30000, key="w_min")
-            l_win_max = c2.number_input("销量(大)", value=99999999, key="w_max")
-        else: l_ratio_h, l_win_min, l_win_max = 50.0, 30000, 99999999
-        sw2 = st.checkbox("🔍 充销比(低)审计", value=True, key="sw2")
-        if sw2:
-            l_ratio_l = st.number_input("充销比(低)", value=2.0, key="r_l")
-            c3, c4 = st.columns(2)
-            l_fee_min = c3.number_input("充值(小)", value=1000, key="f_min")
-            l_fee_max = c4.number_input("充值(大)", value=2000, key="f_max")
-        else: l_ratio_l, l_fee_min, l_fee_max = 2.0, 1000, 2000
-        sw3 = st.checkbox("🔍 待遇审计", value=True, key="sw3"); l_treat = st.number_input("设定值", 50000, key="t_v") if sw3 else 50000
-        sw4 = st.checkbox("🔍 无充下注", value=True, key="sw4"); l_no_fee = st.number_input("设定值", 200000, key="n_v") if sw4 else 200000
-        sw5 = st.checkbox("🔍 大额盈利", value=True, key="sw5"); l_profit = st.number_input("设定值", 100000, key="p_v") if sw5 else 100000
-        btn_2 = st.button("🔥 执行深度审计", type="primary", key="btn2")
-        config_2 = {'sw1':sw1,'sw2':sw2,'sw3':sw3,'sw4':sw4,'sw5':sw5,'ratio_high':l_ratio_h,'win_min':l_win_min,'win_max':l_win_max,'ratio_low':l_ratio_l,'fee_min':l_fee_min,'fee_max':l_fee_max,'limit_treatment':l_treat,'no_fee_limit':l_no_fee,'profit_limit':l_profit}
+        st.markdown("### 🛠️ [盈亏排行] 维度勾选")
+        sw1 = st.checkbox("🔍 充销比(高)审计", value=True, key="s1"); l_rh = st.number_input("设定值", 50.0, key="rh") if sw1 else 50.0
+        c1, c2 = st.columns(2)
+        l_wmin = c1.number_input("销量(小)", 30000, key="wm") if sw1 else 30000
+        l_wmax = c2.number_input("销量(大)", 99999999, key="wx") if sw1 else 99999999
+        
+        sw2 = st.checkbox("🔍 充销比(低)审计", value=True, key="s2"); l_rl = st.number_input("设定值", 2.0, key="rl") if sw2 else 2.0
+        c3, c4 = st.columns(2)
+        l_fmin = c3.number_input("充值(小)", 1000, key="fm") if sw2 else 1000
+        l_fmax = c4.number_input("充值(大)", 2000, key="fx") if sw2 else 2000
+        
+        sw3 = st.checkbox("🔍 待遇审计", value=True, key="s3"); l_tr = st.number_input("返点+工资设定", 50000, key="tv") if sw3 else 50000
+        sw4 = st.checkbox("🔍 无充值下注", value=True, key="s4"); l_nf = st.number_input("下注额设定", 200000, key="nv") if sw4 else 200000
+        sw5 = st.checkbox("🔍 大额盈利", value=True, key="s5"); l_pr = st.number_input("盈利设定", 100000, key="pv") if sw5 else 100000
+        btn_b = st.button("🔥 执行排行审计", type="primary", key="btnb")
+        cfg_b = {'sw1':sw1,'sw2':sw2,'sw3':sw3,'sw4':sw4,'sw5':sw5,'ratio_high':l_rh,'win_min':l_wmin,'win_max':l_wmax,'ratio_low':l_rl,'fee_min':l_fmin,'fee_max':l_fmax,'limit_treatment':l_tr,'no_fee_limit':l_nf,'profit_limit':l_pr}
 
-    st.markdown("<div class='title-banner'><h1>📊 抓鬼专家 - 深度财务引擎</h1></div>", unsafe_allow_html=True)
-    f2 = st.file_uploader("📂 丢这边 (深度)", type=["xlsx"], key="f2")
-    if f2:
-        if btn_2: st.session_state.res2 = run_strict_audit_2(pd.read_excel(f2), config_2)
-        res2 = st.session_state.get("res2")
-        if res2 is not None:
-            st.markdown(f"<div class='metric-card'><div class='metric-label'>符合选定区间异常人数</div><div class='metric-value'>{len(res2)}</div></div>", unsafe_allow_html=True)
-            if not res2.empty:
-                s_c2 = st.selectbox("排序字段", ["销量", "充值", "充销比", "待遇", "盈亏"], index=4, key="s2")
-                s_d2 = st.selectbox("排序方向", ["由大到小", "由小到大"], index=0, key="d2")
-                res2 = res2.sort_values(by=s_c2, ascending=(s_d2=="由小到大"))
-                
-                # ... 此处保持表格渲染逻辑，为简练略 ...
-                st.markdown("""<div class='table-header'><div style='flex:0.8'>确认</div><div style='flex:1.5'>用户名</div><div style='flex:3'>异常结论</div><div style='flex:1.2'>销量</div><div style='flex:1.2'>充值</div><div style='flex:1.2'>比值</div><div style='flex:1.2'>待遇</div><div style='flex:1.2'>盈亏</div></div>""", unsafe_allow_html=True)
-                with st.container(height=500):
-                    for i, row in res2.iterrows():
-                        cols = st.columns([0.8, 1.5, 3, 1.2, 1.2, 1.2, 1.2, 1.2])
-                        cols[1].write(row['用户名'])
-                        cols[2].markdown(f"<span class='badge-giant'>{row['原因']}</span>", unsafe_allow_html=True)
-                        cols[3].write(f"{row['销量']:,.0f}")
-                        cols[4].write(f"{row['充值']:,.0f}")
-                        cols[5].write(f"{row['充销比']:.2f}")
-                        cols[6].write(f"{row['待遇']:,.0f}")
-                        cols[7].write(f"{row['盈亏']:,.0f}")
-                        st.divider()
+    st.markdown("<div class='title-banner'><h1>📈 盈亏排行审计</h1></div>", unsafe_allow_html=True)
+    f_b = st.file_uploader("📂 丢这边", type=["xlsx"], key="fb")
+    if f_b:
+        if btn_b: st.session_state.rb = engine_profit(pd.read_excel(f_b), cfg_b)
+        res_b = st.session_state.get("rb")
+        if res_b is not None:
+            st.dataframe(res_b, use_container_width=True)
