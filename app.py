@@ -3,7 +3,7 @@ import pandas as pd
 import hashlib
 
 # 1. 页面配置
-st.set_page_config(page_title="审计专家系统", layout="wide")
+st.set_page_config(page_title="抓鬼专家", layout="wide")
 
 # 2. 注入所有原始样式 (合并两份代码的 CSS)
 st.markdown("""
