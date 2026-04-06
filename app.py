@@ -49,7 +49,7 @@ if not st.session_state.auth:
             else: st.error("❌ 密码错误")
     st.stop()
 
-# --- 核心引擎 A (完全复制自代码1) ---
+# --- 核心引擎 A ---
 def run_audit_engine(df, rules):
     try:
         df.columns = [str(c).strip() for c in df.columns]
@@ -85,7 +85,7 @@ def run_audit_engine(df, rules):
         return grouped[grouped['原因'].notna()].copy()
     except: return None
 
-# --- 核心引擎 B (完全复制自代码2) ---
+# --- 核心引擎 B ---
 def run_strict_audit(df, cfg):
     try:
         df.columns = [str(c).strip() for c in df.columns]
@@ -125,24 +125,18 @@ with st.sidebar:
 
 # 5. 模块逻辑切换
 if mode == "用户彩票分析":
-    with st.sidebar:
-        st.markdown("### ⚙️ 审计控制中心")
-        use_manual = st.toggle("🚀 手动自定义模式", value=False)
-        st.write("---")
-        v_on = st.toggle("销量筛选", False); v_min = st.number_input("Min销量", 0.0); v_max = st.number_input("Max销量", 2000.0)
-        c_on = st.toggle("单数限制", False); c_limit = st.number_input("单数 ≤", 12)
-        p_on = st.toggle("盈亏限制", False); p_min = st.number_input("Min盈亏", 100000.0); p_max = st.number_input("Max盈亏", 1000000.0)
-        r_on = st.toggle("RTP限制", False); r_min = st.number_input("Min RTP", 0.995, format="%.3f"); r_max = st.number_input("Max RTP", 1.000, format="%.3f")
-        manual_btn = st.button("🔥 执行审计", type="primary")
-        rules = {'use_manual':use_manual, 'v_on':v_on, 'v_min':v_min, 'v_max':v_max, 'c_on':c_on, 'c_limit':c_limit, 'p_on':p_on, 'p_min':p_min, 'p_max':p_max, 'r_on':r_on, 'r_min':r_min, 'r_max':r_max}
-
     st.markdown("<div class='title-banner'><h1>📊 用户彩票分析</h1></div>", unsafe_allow_html=True)
+    
+    # 【改动核心1】先把数据读取出来，以提取彩种列表
     file = st.file_uploader("📂 丢这边", type=["xlsx", "csv"], key="file_a")
     
+    raw = None
+    all_games = []
+    game_col = None
+    selected_games = []
+
     if file:
         f_hash = hashlib.md5(file.getvalue()).hexdigest()
-        
-        # 1. 缓存原始数据 (确保切换下拉选单时不需重新读档)
         if st.session_state.get("last_f_a") != f_hash:
             st.session_state.raw_data_a = pd.read_excel(file) if file.name.endswith('.xlsx') else pd.read_csv(file)
             st.session_state.last_f_a = f_hash
@@ -150,25 +144,36 @@ if mode == "用户彩票分析":
             
         raw = st.session_state.raw_data_a.copy()
         
-        # 2. 动态彩种筛选逻辑 (侧边栏加入下拉选单)
+        # 提取游戏列和列表
         game_cols = [c for c in raw.columns if c in ['彩种', '游戏', '彩种名称', 'Game']]
         if game_cols:
             game_col = game_cols[0]
-            # 获取所有去重后的彩种列表
             all_games = sorted(raw[game_col].astype(str).dropna().unique().tolist())
-            
-            with st.sidebar:
-                st.write("---")
-                st.markdown("### 🎯 彩种筛选 (可复选)")
-                # 使用 multiselect 实现多选，留空代表全选
-                selected_games = st.multiselect("请选择查询特定彩种 (留空代表查全部)", all_games, default=[])
-            
-            # 如果有选择特定彩种，则进行过滤
-            if selected_games:
-                raw = raw[raw[game_col].isin(selected_games)]
-                st.caption(f"📍 当前已筛选彩种: {', '.join(selected_games)}")
+
+    # 【改动核心2】彩种筛选现在排在最上方
+    with st.sidebar:
+        st.markdown("### ⚙️ 审计控制中心")
+        use_manual = st.toggle("🚀 手动自定义模式", value=False)
+        st.write("---")
         
-        # 3. 运行审计引擎并储存结果
+        # 移到此处的彩种筛选 (放在销量筛选正上方)
+        st.markdown("### 🎯 彩种筛选 (可复选)")
+        selected_games = st.multiselect("请选择查询特定彩种 (留空代表查全部)", all_games, default=[], key="ms_a")
+        st.write("---")
+        
+        v_on = st.toggle("销量筛选", False); v_min = st.number_input("Min销量", 0.0); v_max = st.number_input("Max销量", 2000.0)
+        c_on = st.toggle("单数限制", False); c_limit = st.number_input("单数 ≤", 12)
+        p_on = st.toggle("盈亏限制", False); p_min = st.number_input("Min盈亏", 100000.0); p_max = st.number_input("Max盈亏", 1000000.0)
+        r_on = st.toggle("RTP限制", False); r_min = st.number_input("Min RTP", 0.995, format="%.3f"); r_max = st.number_input("Max RTP", 1.000, format="%.3f")
+        manual_btn = st.button("🔥 执行审计", type="primary")
+        rules = {'use_manual':use_manual, 'v_on':v_on, 'v_min':v_min, 'v_max':v_max, 'c_on':c_on, 'c_limit':c_limit, 'p_on':p_on, 'p_min':p_min, 'p_max':p_max, 'r_on':r_on, 'r_min':r_min, 'r_max':r_max}
+
+    # 执行分析与渲染
+    if raw is not None:
+        if selected_games and game_col:
+            raw = raw[raw[game_col].isin(selected_games)]
+            st.caption(f"📍 当前已筛选彩种: {', '.join(selected_games)}")
+            
         st.session_state.res_data_a = run_audit_engine(raw, rules)
         
         res = st.session_state.get("res_data_a")
@@ -206,58 +211,62 @@ if mode == "用户彩票分析":
         elif res is not None: st.success("✅ 扫描完毕，未发现异常。")
 
 else: # 盈亏排行
-    with st.sidebar:
-        st.markdown("### 🛠️ 审计维度勾选")
-        sw1 = st.checkbox("🔍 充销比(高)审计", value=True); l_ratio_h = st.number_input("充销比(高)设定值", value=50.0) if sw1 else 50.0
-        if sw1:
-            st.markdown("<div class='range-label'>📊 销量区间 (在此区间内才跳异常)</div>", unsafe_allow_html=True)
-            c1, c2 = st.columns(2); l_win_min = c1.number_input("销量(小)", value=30000, key="wmin"); l_win_max = c2.number_input("销量(大)", value=99999999, key="wmax")
-            st.markdown("<span class='sidebar-hint'>💡 预防销量虽高但金额无意义会员</span>", unsafe_allow_html=True)
-        else: l_win_min, l_win_max = 30000, 99999999
-        sw2 = st.checkbox("🔍 充销比(低)审计", value=True); l_ratio_l = st.number_input("充销比(低)设定值", value=2.0) if sw2 else 2.0
-        if sw2:
-            st.markdown("<div class='range-label'>💳 充值区间 (在此区间内才跳异常)</div>", unsafe_allow_html=True)
-            c3, c4 = st.columns(2); l_fee_min = c3.number_input("充值(小)", value=1000, key="fmin"); l_fee_max = c4.number_input("充值(大)", value=2000, key="fmax")
-            st.markdown("<span class='sidebar-hint'>💡 预防充值过少或特定额度洗钱</span>", unsafe_allow_html=True)
-        else: l_fee_min, l_fee_max = 1000, 2000
-        sw3 = st.checkbox("🔍 待遇(返点+工资)审计", value=True); l_treat = st.number_input("待遇设定值", value=50000) if sw3 else 50000
-        sw4 = st.checkbox("🔍 无充值下注审计", value=True); l_no_fee = st.number_input("下注额设定", value=200000) if sw4 else 200000
-        sw5 = st.checkbox("🔍 大额盈利审计", value=True); l_profit = st.number_input("盈利设定", value=100000) if sw5 else 100000
-        audit_btn = st.button("🔥 执行组合审计", type="primary", use_container_width=True)
-        config = {'sw1':sw1,'sw2':sw2,'sw3':sw3,'sw4':sw4,'sw5':sw5,'ratio_high':l_ratio_h,'win_min':l_win_min,'win_max':l_win_max,'ratio_low':l_ratio_l,'fee_min':l_fee_min,'fee_max':l_fee_max,'limit_treatment':l_treat,'no_fee_limit':l_no_fee,'profit_limit':l_profit}
-
     st.markdown("<div class='title-banner'><h1>📈 盈亏排行审计</h1></div>", unsafe_allow_html=True)
+    
+    # 提前读取数据以提取彩种列表
     file_b = st.file_uploader("📂 丢这边", type=["xlsx"], key="file_b")
     
+    raw_b = None
+    all_games_b = []
+    game_col_b = None
+    selected_games_b = []
+
     if file_b:
         f_hash_b = hashlib.md5(file_b.getvalue()).hexdigest()
-        
-        # 1. 缓存原始数据
         if st.session_state.get("last_f_b") != f_hash_b:
             st.session_state.raw_data_b = pd.read_excel(file_b)
             st.session_state.last_f_b = f_hash_b
             st.session_state.read_set_b = set()
             
         raw_b = st.session_state.raw_data_b.copy()
-
-        # 2. 动态彩种筛选逻辑 (侧边栏加入下拉选单)
         game_cols_b = [c for c in raw_b.columns if c in ['彩种', '游戏', '彩种名称', 'Game']]
         if game_cols_b:
             game_col_b = game_cols_b[0]
-            # 获取所有去重后的彩种列表
             all_games_b = sorted(raw_b[game_col_b].astype(str).dropna().unique().tolist())
-            
-            with st.sidebar:
-                st.write("---")
-                st.markdown("### 🎯 彩种筛选 (可复选)")
-                selected_games_b = st.multiselect("请选择查询特定彩种 (留空代表查全部)", all_games_b, default=[], key="ms_b")
-            
-            # 如果有选择特定彩种，则进行过滤
-            if selected_games_b:
-                raw_b = raw_b[raw_b[game_col_b].isin(selected_games_b)]
-                st.caption(f"📍 当前已筛选彩种: {', '.join(selected_games_b)}")
 
-        # 3. 运行审计引擎并储存结果
+    with st.sidebar:
+        st.markdown("### 🛠️ 审计维度勾选")
+        
+        # 彩种筛选也放在盈亏排行的最上方
+        st.markdown("### 🎯 彩种筛选 (可复选)")
+        selected_games_b = st.multiselect("请选择查询特定彩种 (留空代表查全部)", all_games_b, default=[], key="ms_b")
+        st.write("---")
+        
+        sw1 = st.checkbox("🔍 充销比(高)审计", value=True); l_ratio_h = st.number_input("充销比(高)设定值", value=50.0) if sw1 else 50.0
+        if sw1:
+            st.markdown("<div class='range-label'>📊 销量区间 (在此区间内才跳异常)</div>", unsafe_allow_html=True)
+            c1, c2 = st.columns(2); l_win_min = c1.number_input("销量(小)", value=30000, key="wmin"); l_win_max = c2.number_input("销量(大)", value=99999999, key="wmax")
+            st.markdown("<span class='sidebar-hint'>💡 预防销量虽高但金额无意义会员</span>", unsafe_allow_html=True)
+        else: l_win_min, l_win_max = 30000, 99999999
+        
+        sw2 = st.checkbox("🔍 充销比(低)审计", value=True); l_ratio_l = st.number_input("充销比(低)设定值", value=2.0) if sw2 else 2.0
+        if sw2:
+            st.markdown("<div class='range-label'>💳 充值区间 (在此区间内才跳异常)</div>", unsafe_allow_html=True)
+            c3, c4 = st.columns(2); l_fee_min = c3.number_input("充值(小)", value=1000, key="fmin"); l_fee_max = c4.number_input("充值(大)", value=2000, key="fmax")
+            st.markdown("<span class='sidebar-hint'>💡 预防充值过少或特定额度洗钱</span>", unsafe_allow_html=True)
+        else: l_fee_min, l_fee_max = 1000, 2000
+        
+        sw3 = st.checkbox("🔍 待遇(返点+工资)审计", value=True); l_treat = st.number_input("待遇设定值", value=50000) if sw3 else 50000
+        sw4 = st.checkbox("🔍 无充值下注审计", value=True); l_no_fee = st.number_input("下注额设定", value=200000) if sw4 else 200000
+        sw5 = st.checkbox("🔍 大额盈利审计", value=True); l_profit = st.number_input("盈利设定", value=100000) if sw5 else 100000
+        audit_btn = st.button("🔥 执行组合审计", type="primary", use_container_width=True)
+        config = {'sw1':sw1,'sw2':sw2,'sw3':sw3,'sw4':sw4,'sw5':sw5,'ratio_high':l_ratio_h,'win_min':l_win_min,'win_max':l_win_max,'ratio_low':l_ratio_l,'fee_min':l_fee_min,'fee_max':l_fee_max,'limit_treatment':l_treat,'no_fee_limit':l_no_fee,'profit_limit':l_profit}
+
+    if raw_b is not None:
+        if selected_games_b and game_col_b:
+            raw_b = raw_b[raw_b[game_col_b].isin(selected_games_b)]
+            st.caption(f"📍 当前已筛选彩种: {', '.join(selected_games_b)}")
+
         st.session_state.res_data_b = run_strict_audit(raw_b, config)
         
         res = st.session_state.res_data_b
