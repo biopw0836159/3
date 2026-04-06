@@ -138,13 +138,38 @@ if mode == "用户彩票分析":
 
     st.markdown("<div class='title-banner'><h1>📊 用户彩票分析</h1></div>", unsafe_allow_html=True)
     file = st.file_uploader("📂 丢这边", type=["xlsx", "csv"], key="file_a")
+    
     if file:
         f_hash = hashlib.md5(file.getvalue()).hexdigest()
-        if st.session_state.get("last_f_a") != f_hash or manual_btn:
-            raw = pd.read_excel(file) if file.name.endswith('.xlsx') else pd.read_csv(file)
-            st.session_state.res_data_a = run_audit_engine(raw, rules)
+        
+        # 1. 缓存原始数据 (确保切换下拉选单时不需重新读档)
+        if st.session_state.get("last_f_a") != f_hash:
+            st.session_state.raw_data_a = pd.read_excel(file) if file.name.endswith('.xlsx') else pd.read_csv(file)
             st.session_state.last_f_a = f_hash
             st.session_state.read_set_a = set()
+            
+        raw = st.session_state.raw_data_a.copy()
+        
+        # 2. 动态彩种筛选逻辑 (侧边栏加入下拉选单)
+        game_cols = [c for c in raw.columns if c in ['彩种', '游戏', '彩种名称', 'Game']]
+        if game_cols:
+            game_col = game_cols[0]
+            # 获取所有去重后的彩种列表
+            all_games = sorted(raw[game_col].astype(str).dropna().unique().tolist())
+            
+            with st.sidebar:
+                st.write("---")
+                st.markdown("### 🎯 彩种筛选 (可复选)")
+                # 使用 multiselect 实现多选，留空代表全选
+                selected_games = st.multiselect("请选择查询特定彩种 (留空代表查全部)", all_games, default=[])
+            
+            # 如果有选择特定彩种，则进行过滤
+            if selected_games:
+                raw = raw[raw[game_col].isin(selected_games)]
+                st.caption(f"📍 当前已筛选彩种: {', '.join(selected_games)}")
+        
+        # 3. 运行审计引擎并储存结果
+        st.session_state.res_data_a = run_audit_engine(raw, rules)
         
         res = st.session_state.get("res_data_a")
         if res is not None and not res.empty:
@@ -203,10 +228,38 @@ else: # 盈亏排行
 
     st.markdown("<div class='title-banner'><h1>📈 盈亏排行审计</h1></div>", unsafe_allow_html=True)
     file_b = st.file_uploader("📂 丢这边", type=["xlsx"], key="file_b")
+    
     if file_b:
-        if "res_data_b" not in st.session_state or audit_btn:
-            st.session_state.res_data_b = run_strict_audit(pd.read_excel(file_b), config)
+        f_hash_b = hashlib.md5(file_b.getvalue()).hexdigest()
+        
+        # 1. 缓存原始数据
+        if st.session_state.get("last_f_b") != f_hash_b:
+            st.session_state.raw_data_b = pd.read_excel(file_b)
+            st.session_state.last_f_b = f_hash_b
             st.session_state.read_set_b = set()
+            
+        raw_b = st.session_state.raw_data_b.copy()
+
+        # 2. 动态彩种筛选逻辑 (侧边栏加入下拉选单)
+        game_cols_b = [c for c in raw_b.columns if c in ['彩种', '游戏', '彩种名称', 'Game']]
+        if game_cols_b:
+            game_col_b = game_cols_b[0]
+            # 获取所有去重后的彩种列表
+            all_games_b = sorted(raw_b[game_col_b].astype(str).dropna().unique().tolist())
+            
+            with st.sidebar:
+                st.write("---")
+                st.markdown("### 🎯 彩种筛选 (可复选)")
+                selected_games_b = st.multiselect("请选择查询特定彩种 (留空代表查全部)", all_games_b, default=[], key="ms_b")
+            
+            # 如果有选择特定彩种，则进行过滤
+            if selected_games_b:
+                raw_b = raw_b[raw_b[game_col_b].isin(selected_games_b)]
+                st.caption(f"📍 当前已筛选彩种: {', '.join(selected_games_b)}")
+
+        # 3. 运行审计引擎并储存结果
+        st.session_state.res_data_b = run_strict_audit(raw_b, config)
+        
         res = st.session_state.res_data_b
         if res is not None:
             st.markdown(f"<div class='metric-card-b'><div style='font-size:14px;color:#64748b'>符合选定区间异常人数</div><div class='metric-value'>{len(res)}</div></div>", unsafe_allow_html=True)
