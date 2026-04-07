@@ -58,48 +58,87 @@ def run_audit_engine(df, rules):
         for k, aliases in mapping.items():
             for col in df.columns:
                 if any(a in col for a in aliases): final_cols[k] = col; break
+                
+        # 提取彩种字段
+        game_cols = [c for c in df.columns if c in ['彩种', '游戏', '彩种名称', 'Game']]
+        has_game = len(game_cols) > 0
+
         temp_df = pd.DataFrame()
         temp_df['用户名'] = df[final_cols['user']].astype(str)
         temp_df['销量'] = pd.to_numeric(df[final_cols['vol']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         temp_df['单数'] = pd.to_numeric(df[final_cols['cnt']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         temp_df['盈亏'] = pd.to_numeric(df[final_cols['profit']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         temp_df['奖金'] = pd.to_numeric(df[final_cols['bonus']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-        grouped = temp_df.groupby('用户名').agg({'销量':'sum', '单数':'sum', '盈亏':'sum', '奖金':'sum'}).reset_index()
+        
+        if has_game:
+            temp_df['彩种'] = df[game_cols[0]].astype(str)
+
+        # 聚合规则
+        agg_dict = {'销量':'sum', '单数':'sum', '盈亏':'sum', '奖金':'sum'}
+        if has_game:
+            # 收集该用户玩过的所有彩种并去重
+            agg_dict['彩种'] = lambda x: ','.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
+
+        grouped = temp_df.groupby('用户名').agg(agg_dict).reset_index()
         grouped['RTP'] = grouped.apply(lambda x: x['奖金'] / x['销量'] if x['销量'] > 0 else 0, axis=1)
+        
         def apply_logic(row):
             v, c, p, r = row['销量'], row['单数'], row['盈亏'], row['RTP']
+            game_prefix = f"[{row['彩种']}] " if has_game and row.get('彩种') else ""
+            
             if rules.get('use_manual', False):
                 match = True
                 if rules['v_on'] and not (rules['v_min'] <= v <= rules['v_max']): match = False
                 if rules['c_on'] and not (c <= rules['c_limit']): match = False
                 if rules['p_on'] and not (rules['p_min'] <= p <= rules['p_max']): match = False
                 if rules['r_on'] and not (rules['r_min'] <= r <= rules['r_max']): match = False
-                return "手动筛选" if match else None
+                return game_prefix + "手动筛选" if match else None
+                
             m = []
             if 1000 <= v <= 2000 and c <= 12: m.append("疑似刷人数")
             if v > 2000 and c <= 10: m.append("疑似对刷")
             if v >= 500000 and 0.995 <= r <= 1.000: m.append("疑似刷量")
             if p >= 100000: m.append("盈利大会员")
-            return " | ".join(m) if m else None
+            
+            return game_prefix + " | ".join(m) if m else None
+            
         grouped['原因'] = grouped.apply(apply_logic, axis=1)
         return grouped[grouped['原因'].notna()].copy()
-    except: return None
+    except Exception as e: 
+        return None
 
 # --- 核心引擎 B ---
 def run_strict_audit(df, cfg):
     try:
         df.columns = [str(c).strip() for c in df.columns]
         last_col = df.columns[-1]
+        
+        # 提取彩种字段
+        game_cols = [c for c in df.columns if c in ['彩种', '游戏', '彩种名称', 'Game']]
+        has_game = len(game_cols) > 0
+
         clean_df = pd.DataFrame()
         clean_df['用户名'] = df['用户名'].astype(str)
         target_cols = ['个人充值手续费', '个人派奖', '个人自身返点/返水', '个人系统分红']
         for col in target_cols: clean_df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         clean_df['盈亏'] = pd.to_numeric(df[last_col], errors='coerce').fillna(0)
-        grouped = clean_df.groupby('用户名').agg({'个人充值手续费':'sum','个人派奖':'sum','个人自身返点/返水':'sum','个人系统分红':'sum','盈亏':'sum'}).reset_index()
+        
+        if has_game:
+            clean_df['彩种'] = df[game_cols[0]].astype(str)
+
+        # 聚合规则
+        agg_dict = {'个人充值手续费':'sum','个人派奖':'sum','个人自身返点/返水':'sum','个人系统分红':'sum','盈亏':'sum'}
+        if has_game:
+            agg_dict['彩种'] = lambda x: ','.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
+
+        grouped = clean_df.groupby('用户名').agg(agg_dict).reset_index()
+        
         def apply_rules(row):
             tags = []
             fee, win, fs, fh, p = row['个人充值手续费'], row['个人派奖'], row['个人自身返点/返水'], row['个人系统分红'], row['盈亏']
             treatment = fs + fh
+            game_prefix = f"[{row['彩种']}] " if has_game and row.get('彩种') else ""
+            
             if cfg['sw1'] and fee > 0:
                 ratio = win / fee
                 if ratio > cfg['ratio_high'] and cfg['win_min'] <= win <= cfg['win_max']: tags.append("充销比过高")
@@ -109,13 +148,16 @@ def run_strict_audit(df, cfg):
             if cfg['sw3'] and treatment > cfg['limit_treatment']: tags.append("待遇过高")
             if cfg['sw4'] and fee == 0 and win > cfg['no_fee_limit']: tags.append("无充下注异常")
             if cfg['sw5'] and p >= cfg['profit_limit']: tags.append("盈利过大")
-            return " | ".join(tags) if tags else None
+            
+            return game_prefix + " | ".join(tags) if tags else None
+            
         grouped['原因'] = grouped.apply(apply_rules, axis=1)
         grouped['销量'] = grouped['个人派奖']; grouped['充值'] = grouped['个人充值手续费']
         grouped['待遇'] = grouped['个人自身返点/返水'] + grouped['个人系统分红']
         grouped['充销比'] = grouped.apply(lambda x: x['销量']/x['充值'] if x['充值']>0 else 0, axis=1)
         return grouped[grouped['原因'].notna()].copy()
-    except: return None
+    except Exception as e: 
+        return None
 
 # 4. 侧边栏导航
 with st.sidebar:
@@ -127,7 +169,6 @@ with st.sidebar:
 if mode == "用户彩票分析":
     st.markdown("<div class='title-banner'><h1>📊 用户彩票分析</h1></div>", unsafe_allow_html=True)
     
-    # 【改动核心1】先把数据读取出来，以提取彩种列表
     file = st.file_uploader("📂 丢这边", type=["xlsx", "csv"], key="file_a")
     
     raw = None
@@ -144,19 +185,16 @@ if mode == "用户彩票分析":
             
         raw = st.session_state.raw_data_a.copy()
         
-        # 提取游戏列和列表
         game_cols = [c for c in raw.columns if c in ['彩种', '游戏', '彩种名称', 'Game']]
         if game_cols:
             game_col = game_cols[0]
             all_games = sorted(raw[game_col].astype(str).dropna().unique().tolist())
 
-    # 【改动核心2】彩种筛选现在排在最上方
     with st.sidebar:
         st.markdown("### ⚙️ 审计控制中心")
         use_manual = st.toggle("🚀 手动自定义模式", value=False)
         st.write("---")
         
-        # 移到此处的彩种筛选 (放在销量筛选正上方)
         st.markdown("### 🎯 彩种筛选 (可复选)")
         selected_games = st.multiselect("请选择查询特定彩种 (留空代表查全部)", all_games, default=[], key="ms_a")
         st.write("---")
@@ -168,7 +206,6 @@ if mode == "用户彩票分析":
         manual_btn = st.button("🔥 执行审计", type="primary")
         rules = {'use_manual':use_manual, 'v_on':v_on, 'v_min':v_min, 'v_max':v_max, 'c_on':c_on, 'c_limit':c_limit, 'p_on':p_on, 'p_min':p_min, 'p_max':p_max, 'r_on':r_on, 'r_min':r_min, 'r_max':r_max}
 
-    # 执行分析与渲染
     if raw is not None:
         if selected_games and game_col:
             raw = raw[raw[game_col].isin(selected_games)]
@@ -213,7 +250,6 @@ if mode == "用户彩票分析":
 else: # 盈亏排行
     st.markdown("<div class='title-banner'><h1>📈 盈亏排行审计</h1></div>", unsafe_allow_html=True)
     
-    # 提前读取数据以提取彩种列表
     file_b = st.file_uploader("📂 丢这边", type=["xlsx"], key="file_b")
     
     raw_b = None
@@ -237,7 +273,6 @@ else: # 盈亏排行
     with st.sidebar:
         st.markdown("### 🛠️ 审计维度勾选")
         
-        # 彩种筛选也放在盈亏排行的最上方
         st.markdown("### 🎯 彩种筛选 (可复选)")
         selected_games_b = st.multiselect("请选择查询特定彩种 (留空代表查全部)", all_games_b, default=[], key="ms_b")
         st.write("---")
