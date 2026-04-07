@@ -77,14 +77,13 @@ def run_audit_engine(df, rules):
         agg_dict = {'销量':'sum', '单数':'sum', '盈亏':'sum', '奖金':'sum'}
         if has_game:
             # 收集该用户玩过的所有彩种并去重
-            agg_dict['彩种'] = lambda x: ','.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
+            agg_dict['彩种'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
 
         grouped = temp_df.groupby('用户名').agg(agg_dict).reset_index()
         grouped['RTP'] = grouped.apply(lambda x: x['奖金'] / x['销量'] if x['销量'] > 0 else 0, axis=1)
         
         def apply_logic(row):
             v, c, p, r = row['销量'], row['单数'], row['盈亏'], row['RTP']
-            game_prefix = f"[{row['彩种']}] " if has_game and row.get('彩种') else ""
             
             if rules.get('use_manual', False):
                 match = True
@@ -92,7 +91,7 @@ def run_audit_engine(df, rules):
                 if rules['c_on'] and not (c <= rules['c_limit']): match = False
                 if rules['p_on'] and not (rules['p_min'] <= p <= rules['p_max']): match = False
                 if rules['r_on'] and not (rules['r_min'] <= r <= rules['r_max']): match = False
-                return game_prefix + "手动筛选" if match else None
+                return "手动筛选" if match else None
                 
             m = []
             if 1000 <= v <= 2000 and c <= 12: m.append("疑似刷人数")
@@ -100,7 +99,7 @@ def run_audit_engine(df, rules):
             if v >= 500000 and 0.995 <= r <= 1.000: m.append("疑似刷量")
             if p >= 100000: m.append("盈利大会员")
             
-            return game_prefix + " | ".join(m) if m else None
+            return " | ".join(m) if m else None
             
         grouped['原因'] = grouped.apply(apply_logic, axis=1)
         return grouped[grouped['原因'].notna()].copy()
@@ -129,7 +128,7 @@ def run_strict_audit(df, cfg):
         # 聚合规则
         agg_dict = {'个人充值手续费':'sum','个人派奖':'sum','个人自身返点/返水':'sum','个人系统分红':'sum','盈亏':'sum'}
         if has_game:
-            agg_dict['彩种'] = lambda x: ','.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
+            agg_dict['彩种'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
 
         grouped = clean_df.groupby('用户名').agg(agg_dict).reset_index()
         
@@ -137,7 +136,6 @@ def run_strict_audit(df, cfg):
             tags = []
             fee, win, fs, fh, p = row['个人充值手续费'], row['个人派奖'], row['个人自身返点/返水'], row['个人系统分红'], row['盈亏']
             treatment = fs + fh
-            game_prefix = f"[{row['彩种']}] " if has_game and row.get('彩种') else ""
             
             if cfg['sw1'] and fee > 0:
                 ratio = win / fee
@@ -149,7 +147,7 @@ def run_strict_audit(df, cfg):
             if cfg['sw4'] and fee == 0 and win > cfg['no_fee_limit']: tags.append("无充下注异常")
             if cfg['sw5'] and p >= cfg['profit_limit']: tags.append("盈利过大")
             
-            return game_prefix + " | ".join(tags) if tags else None
+            return " | ".join(tags) if tags else None
             
         grouped['原因'] = grouped.apply(apply_rules, axis=1)
         grouped['销量'] = grouped['个人派奖']; grouped['充值'] = grouped['个人充值手续费']
@@ -227,22 +225,28 @@ if mode == "用户彩票分析":
             sort_col = sc2.selectbox("排序字段", ["销量", "盈亏", "单数", "RTP"], index=0, key="sort_a")
             sort_dir = sc3.selectbox("排序顺序", ["由大到小", "由小到大"], index=0, key="dir_a")
             res = res.sort_values(by=sort_col, ascending=(sort_dir == "由小到大"))
-            st.markdown("""<div class='table-header'><div style='flex:0.8'>核查</div><div style='flex:2'>用户名</div><div style='flex:2.5'>原因</div><div style='flex:1.5'>总销量</div><div style='flex:1.2'>单数</div><div style='flex:1.5'>盈亏</div><div style='flex:1.2'>RTP</div></div>""", unsafe_allow_html=True)
+            
+            # 【重要修改】：表格头部增加“彩种”并调整比例
+            st.markdown("""<div class='table-header'><div style='flex:0.6'>核查</div><div style='flex:1.5'>用户名</div><div style='flex:1.5'>彩种</div><div style='flex:2.5'>原因</div><div style='flex:1.2'>总销量</div><div style='flex:1.0'>单数</div><div style='flex:1.2'>盈亏</div><div style='flex:1.0'>RTP</div></div>""", unsafe_allow_html=True)
             with st.container(height=500):
                 for i, row in res.iterrows():
                     u = row['用户名']; is_read = u in st.session_state.get("read_set_a", set())
-                    cols = st.columns([0.8, 2, 2.5, 1.5, 1.2, 1.5, 1.2])
+                    # 【重要修改】：栏位比例配对
+                    cols = st.columns([0.6, 1.5, 1.5, 2.5, 1.2, 1.0, 1.2, 1.0])
                     if cols[0].checkbox(" ", key=f"ka_{u}_{i}", value=is_read): 
                         if "read_set_a" not in st.session_state: st.session_state.read_set_a = set()
                         st.session_state.read_set_a.add(u)
                     else: st.session_state.read_set_a.discard(u)
                     style = "color:#94a3b8; text-decoration:line-through;" if is_read else "color:#1e293b;"
+                    
+                    # 渲染数据，新增彩种显示
                     cols[1].markdown(f"<span style='{style}'>{u}</span>", unsafe_allow_html=True)
-                    cols[2].markdown(f"<span class='badge-red'>{row['原因']}</span>", unsafe_allow_html=True)
-                    cols[3].markdown(f"<span style='{style}'>{row['销量']:,.0f}</span>", unsafe_allow_html=True)
-                    cols[4].markdown(f"<span style='{style}'>{int(row['单数'])}</span>", unsafe_allow_html=True)
-                    cols[5].markdown(f"<span style='{style}'>{row['盈亏']:,.0f}</span>", unsafe_allow_html=True)
-                    cols[6].markdown(f"<span style='{style}'>{row['RTP']:.3f}</span>", unsafe_allow_html=True)
+                    cols[2].markdown(f"<span style='{style}'>{row.get('彩种', '-')}</span>", unsafe_allow_html=True)
+                    cols[3].markdown(f"<span class='badge-red'>{row['原因']}</span>", unsafe_allow_html=True)
+                    cols[4].markdown(f"<span style='{style}'>{row['销量']:,.0f}</span>", unsafe_allow_html=True)
+                    cols[5].markdown(f"<span style='{style}'>{int(row['单数'])}</span>", unsafe_allow_html=True)
+                    cols[6].markdown(f"<span style='{style}'>{row['盈亏']:,.0f}</span>", unsafe_allow_html=True)
+                    cols[7].markdown(f"<span style='{style}'>{row['RTP']:.3f}</span>", unsafe_allow_html=True)
                     st.divider()
             st.download_button("📥 导出结果", res.to_csv(index=False).encode('utf-8-sig'), "audit_a.csv")
         elif res is not None: st.success("✅ 扫描完毕，未发现异常。")
@@ -312,21 +316,27 @@ else: # 盈亏排行
                 sort_col = sc2.selectbox("排序字段", ["销量", "充值", "充销比", "待遇", "盈亏"], index=4, key="sort_b")
                 sort_dir = sc3.selectbox("排序方向", ["由大到小", "由小到大"], index=0, key="dir_b")
                 res = res.sort_values(by=sort_col, ascending=(sort_dir == "由小到大"))
-                st.markdown("""<div class='table-header'><div style='flex:0.8'>确认</div><div style='flex:1.5'>用户名</div><div style='flex:3'>异常结论 (大号字体)</div><div style='flex:1.2'>销量</div><div style='flex:1.2'>充值</div><div style='flex:1.2'>比值</div><div style='flex:1.2'>待遇</div><div style='flex:1.2'>盈亏</div></div>""", unsafe_allow_html=True)
+                
+                # 【重要修改】：表格头部增加“彩种”并调整比例
+                st.markdown("""<div class='table-header'><div style='flex:0.6'>确认</div><div style='flex:1.5'>用户名</div><div style='flex:1.5'>彩种</div><div style='flex:2.5'>异常结论</div><div style='flex:1.0'>销量</div><div style='flex:1.0'>充值</div><div style='flex:1.0'>比值</div><div style='flex:1.0'>待遇</div><div style='flex:1.0'>盈亏</div></div>""", unsafe_allow_html=True)
                 with st.container(height=500):
                     for i, row in res.iterrows():
                         u = row['用户名']; is_read = u in st.session_state.get("read_set_b", set())
-                        cols = st.columns([0.8, 1.5, 3, 1.2, 1.2, 1.2, 1.2, 1.2])
+                        # 【重要修改】：栏位比例配对
+                        cols = st.columns([0.6, 1.5, 1.5, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0])
                         if cols[0].checkbox(" ", key=f"fb_{u}_{i}", value=is_read):
                             if "read_set_b" not in st.session_state: st.session_state.read_set_b = set()
                             st.session_state.read_set_b.add(u)
                         else: st.session_state.read_set_b.discard(u)
                         style = "color:#94a3b8; text-decoration:line-through;" if is_read else "color:#1e293b;"
+                        
+                        # 渲染数据，新增彩种显示
                         cols[1].markdown(f"<span style='{style}'>{u}</span>", unsafe_allow_html=True)
-                        cols[2].markdown(f"<span class='badge-giant'>{row['原因']}</span>", unsafe_allow_html=True)
-                        cols[3].markdown(f"<span style='{style}'>{row['销量']:,.1f}</span>", unsafe_allow_html=True)
-                        cols[4].markdown(f"<span style='{style}'>{row['充值']:,.1f}</span>", unsafe_allow_html=True)
-                        cols[5].markdown(f"<span style='{style}'>{row['充销比']:.2f}</span>", unsafe_allow_html=True)
-                        cols[6].markdown(f"<span style='{style}'>{row['待遇']:,.1f}</span>", unsafe_allow_html=True)
-                        cols[7].markdown(f"<span style='{style}'>{row['盈亏']:,.1f}</span>", unsafe_allow_html=True)
+                        cols[2].markdown(f"<span style='{style}'>{row.get('彩种', '-')}</span>", unsafe_allow_html=True)
+                        cols[3].markdown(f"<span class='badge-giant'>{row['原因']}</span>", unsafe_allow_html=True)
+                        cols[4].markdown(f"<span style='{style}'>{row['销量']:,.1f}</span>", unsafe_allow_html=True)
+                        cols[5].markdown(f"<span style='{style}'>{row['充值']:,.1f}</span>", unsafe_allow_html=True)
+                        cols[6].markdown(f"<span style='{style}'>{row['充销比']:.2f}</span>", unsafe_allow_html=True)
+                        cols[7].markdown(f"<span style='{style}'>{row['待遇']:,.1f}</span>", unsafe_allow_html=True)
+                        cols[8].markdown(f"<span style='{style}'>{row['盈亏']:,.1f}</span>", unsafe_allow_html=True)
                         st.divider()
