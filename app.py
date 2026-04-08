@@ -56,13 +56,20 @@ if not st.session_state.auth:
     st.stop()
 
 # --- 通用列名匹配函数 (严谨修正版) ---
-def get_mapped_col(df, exact_matches, partial_matches):
-    """优先进行全字精确匹配，避免错抓(如把userId当成用户名)。若无精确匹配再使用模糊比对。"""
+def get_mapped_col(df, exact_matches, partial_matches, exclude_keywords=None):
+    """优先进行全字精确匹配，避免错抓(如把userId当成用户名)。若无精确匹配再使用模糊比对(可排除特定关键字)。"""
+    if exclude_keywords is None:
+        exclude_keywords = []
+        
     for c in df.columns:
         if str(c).lower().strip() in [x.lower() for x in exact_matches]: 
             return c
+            
     for c in df.columns:
-        if any(p.lower() in str(c).lower().strip() for p in partial_matches): 
+        c_str = str(c).lower().strip()
+        if any(ext.lower() in c_str for ext in exclude_keywords):
+            continue
+        if any(p.lower() in c_str for p in partial_matches): 
             return c
     return None
 
@@ -125,8 +132,13 @@ def run_audit_engine(df, rules):
     try:
         df.columns = [str(c).strip() for c in df.columns]
         
-        # 🟢 精确获取所需列，避免 userId 被误判为用户名
-        user_col = get_mapped_col(df, ['userName', 'username', '用户名', '账号', '会员账号', '会员名'], ['user', 'account', '玩家', '会员'])
+        # 🟢 严谨修正：增加 memberName 匹配，并坚决排除带有 id 的列（防止错抓 userId），确保与盈亏排行完全一致
+        user_col = get_mapped_col(
+            df, 
+            ['userName', 'username', '用户名', '账号', '会员账号', '会员名', 'memberName', 'loginName'], 
+            ['user', 'account', '玩家', '会员', 'member'],
+            exclude_keywords=['id']
+        )
         vol_col = get_mapped_col(df, ['betAmount', 'validBetAmount', '销量', '总销量'], ['bet', '投注', '下注', '流水', 'vol'])
         cnt_col = get_mapped_col(df, ['betCount', '单数', '总单数'], ['count', '次数', '笔数', 'cnt'])
         profit_col = get_mapped_col(df, ['netAmount', 'winAmount', '盈亏', '总盈亏'], ['profit', '盈利', '派彩', '输赢'])
@@ -193,8 +205,13 @@ def run_strict_audit(df, cfg):
         df.columns = [str(c).strip() for c in df.columns]
         last_col = df.columns[-1]
         
-        # 🟢 精确获取列，解决盈亏排行 API 找不到彩种(Platform)和用户名错抓问题
-        user_col = get_mapped_col(df, ['userName', 'username', '用户名', '账号', '会员账号', '会员名'], ['user', 'account', '玩家', '会员'])
+        # 🟢 严谨修正：确保盈亏排行使用完全相同且带排除逻辑的抓取方式
+        user_col = get_mapped_col(
+            df, 
+            ['userName', 'username', '用户名', '账号', '会员账号', '会员名', 'memberName', 'loginName'], 
+            ['user', 'account', '玩家', '会员', 'member'],
+            exclude_keywords=['id']
+        )
         game_col = get_mapped_col(df, ['lotteryName', 'platform', '彩种', '平台', 'gameName'], ['lottery', 'game', '游戏', '玩法'])
 
         clean_df = pd.DataFrame()
