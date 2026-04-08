@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import hashlib
+import datetime
 
 # 1. 页面配置
 st.set_page_config(page_title="抓鬼专家", layout="wide")
@@ -192,6 +193,21 @@ if mode == "用户彩票分析":
         st.markdown("### ⚙️ 审计控制中心")
         use_manual = st.toggle("🚀 手动自定义模式", value=False)
         st.write("---")
+
+        # ================== 新增：日期區間篩選模組 ==================
+        st.markdown("### 📅 時間區間篩選")
+        use_time_filter_a = st.toggle("啟用時間篩選", False, key="time_a")
+        if use_time_filter_a:
+            col_st, col_et = st.columns(2)
+            # 預設範例: 2026/04/01 03:00 ~ 2026/04/09 03:00
+            start_date_a = col_st.date_input("開始日期", datetime.date(2026, 4, 1), key="sd_a")
+            start_time_a = col_st.time_input("開始時間", datetime.time(3, 0), key="st_a")
+            end_date_a = col_et.date_input("結束日期", datetime.date(2026, 4, 9), key="ed_a")
+            end_time_a = col_et.time_input("結束時間", datetime.time(3, 0), key="et_a")
+            dt_start_a = pd.to_datetime(f"{start_date_a} {start_time_a}")
+            dt_end_a = pd.to_datetime(f"{end_date_a} {end_time_a}")
+        st.write("---")
+        # ==========================================================
         
         st.markdown("### 🎯 彩种筛选 (可复选)")
         selected_games = st.multiselect("请选择查询特定彩种 (留空代表查全部)", all_games, default=[], key="ms_a")
@@ -205,6 +221,19 @@ if mode == "用户彩票分析":
         rules = {'use_manual':use_manual, 'v_on':v_on, 'v_min':v_min, 'v_max':v_max, 'c_on':c_on, 'c_limit':c_limit, 'p_on':p_on, 'p_min':p_min, 'p_max':p_max, 'r_on':r_on, 'r_min':r_min, 'r_max':r_max}
 
     if raw is not None:
+        # ================== 執行：日期區間篩選 ==================
+        if use_time_filter_a:
+            # 智慧識別時間欄位
+            time_cols = [c for c in raw.columns if any(k in str(c).lower() for k in ['时间', '日期', 'date', 'time', '下注时间', '派彩时间', '创建时间'])]
+            if time_cols:
+                t_col = time_cols[0]
+                raw[t_col] = pd.to_datetime(raw[t_col], errors='coerce')
+                raw = raw[(raw[t_col] >= dt_start_a) & (raw[t_col] <= dt_end_a)]
+                st.caption(f"🕒 已啟動時間篩選：{dt_start_a} 至 {dt_end_a} (識別欄位: {t_col})")
+            else:
+                st.sidebar.error("❌ 找不到有效的時間/日期欄位，無法進行過濾！")
+        # =======================================================
+
         if selected_games and game_col:
             raw = raw[raw[game_col].isin(selected_games)]
             st.caption(f"📍 当前已筛选彩种: {', '.join(selected_games)}")
@@ -276,6 +305,21 @@ else: # 盈亏排行
 
     with st.sidebar:
         st.markdown("### 🛠️ 审计维度勾选")
+
+        # ================== 新增：日期區間篩選模組 ==================
+        st.markdown("### 📅 時間區間篩選")
+        use_time_filter_b = st.toggle("啟用時間篩選", False, key="time_b")
+        if use_time_filter_b:
+            col_st, col_et = st.columns(2)
+            # 預設範例: 2026/04/01 03:00 ~ 2026/04/09 03:00
+            start_date_b = col_st.date_input("開始日期", datetime.date(2026, 4, 1), key="sd_b")
+            start_time_b = col_st.time_input("開始時間", datetime.time(3, 0), key="st_b")
+            end_date_b = col_et.date_input("結束日期", datetime.date(2026, 4, 9), key="ed_b")
+            end_time_b = col_et.time_input("結束時間", datetime.time(3, 0), key="et_b")
+            dt_start_b = pd.to_datetime(f"{start_date_b} {start_time_b}")
+            dt_end_b = pd.to_datetime(f"{end_date_b} {end_time_b}")
+        st.write("---")
+        # ==========================================================
         
         st.markdown("### 🎯 彩种筛选 (可复选)")
         selected_games_b = st.multiselect("请选择查询特定彩种 (留空代表查全部)", all_games_b, default=[], key="ms_b")
@@ -302,6 +346,18 @@ else: # 盈亏排行
         config = {'sw1':sw1,'sw2':sw2,'sw3':sw3,'sw4':sw4,'sw5':sw5,'ratio_high':l_ratio_h,'win_min':l_win_min,'win_max':l_win_max,'ratio_low':l_ratio_l,'fee_min':l_fee_min,'fee_max':l_fee_max,'limit_treatment':l_treat,'no_fee_limit':l_no_fee,'profit_limit':l_profit}
 
     if raw_b is not None:
+        # ================== 執行：日期區間篩選 ==================
+        if use_time_filter_b:
+            time_cols_b = [c for c in raw_b.columns if any(k in str(c).lower() for k in ['时间', '日期', 'date', 'time', '下注时间', '派彩时间', '创建时间'])]
+            if time_cols_b:
+                t_col_b = time_cols_b[0]
+                raw_b[t_col_b] = pd.to_datetime(raw_b[t_col_b], errors='coerce')
+                raw_b = raw_b[(raw_b[t_col_b] >= dt_start_b) & (raw_b[t_col_b] <= dt_end_b)]
+                st.caption(f"🕒 已啟動時間篩選：{dt_start_b} 至 {dt_end_b} (識別欄位: {t_col_b})")
+            else:
+                st.sidebar.error("❌ 找不到有效的時間/日期欄位，無法進行過濾！")
+        # =======================================================
+
         if selected_games_b and game_col_b:
             raw_b = raw_b[raw_b[game_col_b].isin(selected_games_b)]
             st.caption(f"📍 当前已筛选彩种: {', '.join(selected_games_b)}")
