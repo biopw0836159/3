@@ -56,8 +56,8 @@ if not st.session_state.auth:
 def fetch_api_data(endpoint, d_start, d_end):
     """通用 API 数据获取函数，带缓存避免频繁请求"""
     headers = {
-        "Authorization": "Bearer sk-d79a713c1ebd5517abe86fc596ca1a0166234df7",
-        "x-api-key": "sk-d79a713c1ebd5517abe86fc596ca1a0166234df7" # 双重认证注入以提高兼容性
+        "Authorization": "Bearer sk-d79a713caf53e8bdh3154a596ca1a0166234df7",
+        "x-api-key": "sk-d79a713caf53e8bdh3154a596ca1a0166234df7" # 更新为最新密钥，双重认证注入以提高兼容性
     }
     params = {
         "dateStart": d_start,
