@@ -55,17 +55,28 @@ if not st.session_state.auth:
 @st.cache_data(show_spinner=False, ttl=300)
 def fetch_api_data(endpoint, d_start, d_end):
     """通用 API 数据获取函数，带缓存避免频繁请求"""
+    # 去除时间字符串首尾空格，防止拼接错误
+    d_start = str(d_start).strip()
+    d_end = str(d_end).strip()
+    
     headers = {
         "Authorization": "Bearer sk-d79a713caf53e8bdh3154a596ca1a0166234df7",
-        "x-api-key": "sk-d79a713caf53e8bdh3154a596ca1a0166234df7" # 更新为最新密钥，双重认证注入以提高兼容性
+        "x-api-key": "sk-d79a713caf53e8bdh3154a596ca1a0166234df7",
+        "Content-Type": "application/json"
     }
+    
     params = {
         "dateStart": d_start,
         "dateEnd": d_end
     }
+    
     try:
-        response = requests.get(endpoint, params=params, headers=headers, timeout=60)
-        response.raise_for_status()
+        # 使用 timeout 防止请求无限挂起
+        response = requests.get(endpoint, params=params, headers=headers, timeout=30)
+        
+        # 如果返回 400 等错误，这里会抛出异常
+        response.raise_for_status() 
+        
         data = response.json()
         
         # 兼容处理常见的 API JSON 数据包裹结构
@@ -80,14 +91,19 @@ def fetch_api_data(endpoint, d_start, d_end):
             df = pd.DataFrame(data)
             
         return df
+    except requests.exceptions.HTTPError as e:
+        # 捕获具体的 HTTP 错误并输出后端返回的错误信息
+        st.error(f"❌ 接口响应错误 (HTTP {e.response.status_code}): {e.response.text}")
+        return None
     except Exception as e:
-        st.error(f"❌ API 请求异常: {e}")
+        st.error(f"❌ 网络或解析异常: {e}")
         return None
 
 # --- 时间动态预设值计算 ---
 now = datetime.datetime.now()
-default_start = now.strftime("%Y-%m-%d 03:00")
-default_end = (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d 03:00")
+# 修改为只输出简单的 YYYY-MM-DD 日期格式
+default_start = now.strftime("%Y-%m-%d")
+default_end = (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
 
 # --- 核心引擎 A ---
 def run_audit_engine(df, rules):
@@ -268,7 +284,7 @@ if mode == "用户彩票分析":
                     t_col = time_cols[0]
                     raw[t_col] = pd.to_datetime(raw[t_col], errors='coerce')
                     raw = raw[(raw[t_col] >= dt_start_a) & (raw[t_col] <= dt_end_a)]
-                    st.caption(f"🕒 已套用雙重時間篩選：{dt_start_a} 至 {dt_end_a} (識別欄位: {t_col})")
+                    st.caption(f"🕒 已套用雙重時間篩選：{dt_start_a.date()} 至 {dt_end_a.date()} (识别栏位: {t_col})")
         # =======================================================
 
         if selected_games and game_col:
@@ -387,7 +403,7 @@ else: # 盈亏排行
                     t_col_b = time_cols_b[0]
                     raw_b[t_col_b] = pd.to_datetime(raw_b[t_col_b], errors='coerce')
                     raw_b = raw_b[(raw_b[t_col_b] >= dt_start_b) & (raw_b[t_col_b] <= dt_end_b)]
-                    st.caption(f"🕒 已套用雙重時間篩選：{dt_start_b} 至 {dt_end_b} (識別欄位: {t_col_b})")
+                    st.caption(f"🕒 已套用雙重時間篩選：{dt_start_b.date()} 至 {dt_end_b.date()} (识别栏位: {t_col_b})")
         # =======================================================
 
         if selected_games_b and game_col_b:
