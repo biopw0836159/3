@@ -7,7 +7,7 @@ import requests
 # ==========================================
 # ⚙️ 系統底層配置區 (解決 API 400 報錯)
 # 請在這裡填入您要查詢的「所有平台代碼」，以逗號分隔
-GLOBAL_PLATFORMS = "XO,XO2" 
+GLOBAL_PLATFORMS = "YD,XO,ND,JD,SY,MT,LY,FB,XY,XO,OL,LS,HS,JY,YS,SH,XH" 
 # ==========================================
 
 # 1. 页面配置
