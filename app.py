@@ -1,10 +1,3 @@
-這是一份為您完整修改好、可直接覆蓋的 `app.py` 代碼。
-
-我已經將原本的「開關」與「4個獨立時間日期欄位」移除，並依您的需求**直接整合成 `datestart` 與 `dateend` 兩個純文字輸入欄位**。這樣您可以直接貼上如 `2026/04/01 03:00` 的格式，系統會自動辨識並進行過濾。如果您不想要篩選時間，只需將欄位清空即可。
-
-請完整複製以下代碼並覆蓋：
-
-```python
 import streamlit as st
 import pandas as pd
 import hashlib
@@ -400,4 +393,3 @@ else: # 盈亏排行
                         cols[7].markdown(f"<span style='{style}'>{row['待遇']:,.1f}</span>", unsafe_allow_html=True)
                         cols[8].markdown(f"<span style='{style}'>{row['盈亏']:,.1f}</span>", unsafe_allow_html=True)
                         st.divider()
-```
