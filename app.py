@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import hashlib
 import datetime
+import requests
 
 # 1. 页面配置
 st.set_page_config(page_title="抓鬼专家", layout="wide")
@@ -49,6 +50,44 @@ if not st.session_state.auth:
             if pwd == "0224": st.session_state.auth = True; st.rerun()
             else: st.error("❌ 密码错误")
     st.stop()
+
+# --- 核心数据获取模块 (API 串接) ---
+@st.cache_data(show_spinner=False, ttl=300)
+def fetch_api_data(endpoint, d_start, d_end):
+    """通用 API 数据获取函数，带缓存避免频繁请求"""
+    headers = {
+        "Authorization": "Bearer sk-d79a713c1ebd5517abe86fc596ca1a0166234df7",
+        "x-api-key": "sk-d79a713c1ebd5517abe86fc596ca1a0166234df7" # 双重认证注入以提高兼容性
+    }
+    params = {
+        "dateStart": d_start,
+        "dateEnd": d_end
+    }
+    try:
+        response = requests.get(endpoint, params=params, headers=headers, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        
+        # 兼容处理常见的 API JSON 数据包裹结构
+        if isinstance(data, dict):
+            if "data" in data:
+                df = pd.DataFrame(data["data"])
+            elif "records" in data:
+                df = pd.DataFrame(data["records"])
+            else:
+                df = pd.DataFrame([data])
+        else:
+            df = pd.DataFrame(data)
+            
+        return df
+    except Exception as e:
+        st.error(f"❌ API 请求异常: {e}")
+        return None
+
+# --- 时间动态预设值计算 ---
+now = datetime.datetime.now()
+default_start = now.strftime("%Y-%m-%d 03:00")
+default_end = (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d 03:00")
 
 # --- 核心引擎 A ---
 def run_audit_engine(df, rules):
@@ -166,42 +205,46 @@ with st.sidebar:
 
 # 5. 模块逻辑切换
 if mode == "用户彩票分析":
-    st.markdown("<div class='title-banner'><h1>📊 用户彩票分析</h1></div>", unsafe_allow_html=True)
+    st.markdown("<div class='title-banner'><h1>📊 用户彩票分析 (API数据源)</h1></div>", unsafe_allow_html=True)
     
-    file = st.file_uploader("📂 丢这边", type=["xlsx", "csv"], key="file_a")
-    
+    with st.sidebar:
+        st.markdown("### ⚙️ 审计控制中心")
+        use_manual = st.toggle("🚀 手动自定义模式", value=False)
+        st.write("---")
+
+        st.markdown("### 📅 日期时间筛选")
+        col_st, col_et = st.columns(2)
+        datestart_a = col_st.text_input("开始时间", value=default_start, key="ds_a")
+        dateend_a = col_et.text_input("结束时间", value=default_end, key="de_a")
+        
+        if st.button("🔄 重新拉取 API 数据", use_container_width=True):
+            st.cache_data.clear()
+            
+        st.write("---")
+
     raw = None
     all_games = []
     game_col = None
     selected_games = []
 
-    if file:
-        f_hash = hashlib.md5(file.getvalue()).hexdigest()
-        if st.session_state.get("last_f_a") != f_hash:
-            st.session_state.raw_data_a = pd.read_excel(file) if file.name.endswith('.xlsx') else pd.read_csv(file)
-            st.session_state.last_f_a = f_hash
+    # API 自动数据拉取
+    api_url_a = "https://stats-crawler.up.railway.app/api/open/lottery-analysis"
+    with st.spinner("正在向 API 请求最新彩票分析数据，请稍候..."):
+        raw = fetch_api_data(api_url_a, datestart_a, dateend_a)
+
+    if raw is not None and not raw.empty:
+        # 使用查询参数的 Hash 来维护已读状态
+        req_hash = hashlib.md5(f"{datestart_a}_{dateend_a}".encode()).hexdigest()
+        if st.session_state.get("last_req_a") != req_hash:
             st.session_state.read_set_a = set()
+            st.session_state.last_req_a = req_hash
             
-        raw = st.session_state.raw_data_a.copy()
-        
         game_cols = [c for c in raw.columns if c in ['彩种', '游戏', '彩种名称', 'Game']]
         if game_cols:
             game_col = game_cols[0]
             all_games = sorted(raw[game_col].astype(str).dropna().unique().tolist())
 
     with st.sidebar:
-        st.markdown("### ⚙️ 审计控制中心")
-        use_manual = st.toggle("🚀 手动自定义模式", value=False)
-        st.write("---")
-
-        # ================== 修改：整合為純文字欄位 ==================
-        st.markdown("### 📅 日期時間篩選 (留空則不篩選)")
-        col_st, col_et = st.columns(2)
-        datestart_a = col_st.text_input("開始時間 (datestart)", value="2026/04/01 03:00", key="ds_a")
-        dateend_a = col_et.text_input("結束時間 (dateend)", value="2026/04/09 03:00", key="de_a")
-        st.write("---")
-        # ==========================================================
-        
         st.markdown("### 🎯 彩种筛选 (可复选)")
         selected_games = st.multiselect("请选择查询特定彩种 (留空代表查全部)", all_games, default=[], key="ms_a")
         st.write("---")
@@ -213,8 +256,8 @@ if mode == "用户彩票分析":
         manual_btn = st.button("🔥 执行审计", type="primary")
         rules = {'use_manual':use_manual, 'v_on':v_on, 'v_min':v_min, 'v_max':v_max, 'c_on':c_on, 'c_limit':c_limit, 'p_on':p_on, 'p_min':p_min, 'p_max':p_max, 'r_on':r_on, 'r_min':r_min, 'r_max':r_max}
 
-    if raw is not None:
-        # ================== 執行：日期時間篩選 ==================
+    if raw is not None and not raw.empty:
+        # ================== 執行：日期時間雙重篩選 (保障數據純淨度) ==================
         if datestart_a.strip() and dateend_a.strip():
             dt_start_a = pd.to_datetime(datestart_a, errors='coerce')
             dt_end_a = pd.to_datetime(dateend_a, errors='coerce')
@@ -225,11 +268,7 @@ if mode == "用户彩票分析":
                     t_col = time_cols[0]
                     raw[t_col] = pd.to_datetime(raw[t_col], errors='coerce')
                     raw = raw[(raw[t_col] >= dt_start_a) & (raw[t_col] <= dt_end_a)]
-                    st.caption(f"🕒 已套用時間篩選：{dt_start_a} 至 {dt_end_a} (識別欄位: {t_col})")
-                else:
-                    st.sidebar.error("❌ 資料表中找不到有效的時間/日期欄位，無法進行過濾！")
-            else:
-                st.sidebar.warning("⚠️ 日期時間格式無法識別，請確認格式 (例: 2026/04/01 03:00)")
+                    st.caption(f"🕒 已套用雙重時間篩選：{dt_start_a} 至 {dt_end_a} (識別欄位: {t_col})")
         # =======================================================
 
         if selected_games and game_col:
@@ -253,12 +292,10 @@ if mode == "用户彩票分析":
             sort_dir = sc3.selectbox("排序顺序", ["由大到小", "由小到大"], index=0, key="dir_a")
             res = res.sort_values(by=sort_col, ascending=(sort_dir == "由小到大"))
             
-            # 【重要修改】：表格头部增加“彩种”并调整比例
             st.markdown("""<div class='table-header'><div style='flex:0.6'>核查</div><div style='flex:1.5'>用户名</div><div style='flex:1.5'>彩种</div><div style='flex:2.5'>原因</div><div style='flex:1.2'>总销量</div><div style='flex:1.0'>单数</div><div style='flex:1.2'>盈亏</div><div style='flex:1.0'>RTP</div></div>""", unsafe_allow_html=True)
             with st.container(height=500):
                 for i, row in res.iterrows():
                     u = row['用户名']; is_read = u in st.session_state.get("read_set_a", set())
-                    # 【重要修改】：栏位比例配对
                     cols = st.columns([0.6, 1.5, 1.5, 2.5, 1.2, 1.0, 1.2, 1.0])
                     if cols[0].checkbox(" ", key=f"ka_{u}_{i}", value=is_read): 
                         if "read_set_a" not in st.session_state: st.session_state.read_set_a = set()
@@ -266,7 +303,6 @@ if mode == "用户彩票分析":
                     else: st.session_state.read_set_a.discard(u)
                     style = "color:#94a3b8; text-decoration:line-through;" if is_read else "color:#1e293b;"
                     
-                    # 渲染数据，新增彩种显示
                     cols[1].markdown(f"<span style='{style}'>{u}</span>", unsafe_allow_html=True)
                     cols[2].markdown(f"<span style='{style}'>{row.get('彩种', '-')}</span>", unsafe_allow_html=True)
                     cols[3].markdown(f"<span class='badge-red'>{row['原因']}</span>", unsafe_allow_html=True)
@@ -279,39 +315,42 @@ if mode == "用户彩票分析":
         elif res is not None: st.success("✅ 扫描完毕，未发现异常。")
 
 else: # 盈亏排行
-    st.markdown("<div class='title-banner'><h1>📈 盈亏排行审计</h1></div>", unsafe_allow_html=True)
+    st.markdown("<div class='title-banner'><h1>📈 盈亏排行审计 (API数据源)</h1></div>", unsafe_allow_html=True)
     
-    file_b = st.file_uploader("📂 丢这边", type=["xlsx"], key="file_b")
-    
+    with st.sidebar:
+        st.markdown("### 🛠️ 审计维度勾选")
+        st.markdown("### 📅 日期时间筛选")
+        col_st, col_et = st.columns(2)
+        datestart_b = col_st.text_input("开始时间", value=default_start, key="ds_b")
+        dateend_b = col_et.text_input("结束时间", value=default_end, key="de_b")
+        
+        if st.button("🔄 重新拉取 API 数据", key="refresh_b", use_container_width=True):
+            st.cache_data.clear()
+            
+        st.write("---")
+
     raw_b = None
     all_games_b = []
     game_col_b = None
     selected_games_b = []
 
-    if file_b:
-        f_hash_b = hashlib.md5(file_b.getvalue()).hexdigest()
-        if st.session_state.get("last_f_b") != f_hash_b:
-            st.session_state.raw_data_b = pd.read_excel(file_b)
-            st.session_state.last_f_b = f_hash_b
+    # API 自动数据拉取
+    api_url_b = "https://stats-crawler.up.railway.app/api/open/member-income"
+    with st.spinner("正在向 API 请求盈亏排行数据，请稍候..."):
+        raw_b = fetch_api_data(api_url_b, datestart_b, dateend_b)
+
+    if raw_b is not None and not raw_b.empty:
+        req_hash_b = hashlib.md5(f"{datestart_b}_{dateend_b}".encode()).hexdigest()
+        if st.session_state.get("last_req_b") != req_hash_b:
             st.session_state.read_set_b = set()
+            st.session_state.last_req_b = req_hash_b
             
-        raw_b = st.session_state.raw_data_b.copy()
         game_cols_b = [c for c in raw_b.columns if c in ['彩种', '游戏', '彩种名称', 'Game']]
         if game_cols_b:
             game_col_b = game_cols_b[0]
             all_games_b = sorted(raw_b[game_col_b].astype(str).dropna().unique().tolist())
 
     with st.sidebar:
-        st.markdown("### 🛠️ 审计维度勾选")
-
-        # ================== 修改：整合為純文字欄位 ==================
-        st.markdown("### 📅 日期時間篩選 (留空則不篩選)")
-        col_st, col_et = st.columns(2)
-        datestart_b = col_st.text_input("開始時間 (datestart)", value="2026/04/01 03:00", key="ds_b")
-        dateend_b = col_et.text_input("結束時間 (dateend)", value="2026/04/09 03:00", key="de_b")
-        st.write("---")
-        # ==========================================================
-        
         st.markdown("### 🎯 彩种筛选 (可复选)")
         selected_games_b = st.multiselect("请选择查询特定彩种 (留空代表查全部)", all_games_b, default=[], key="ms_b")
         st.write("---")
@@ -336,8 +375,8 @@ else: # 盈亏排行
         audit_btn = st.button("🔥 执行组合审计", type="primary", use_container_width=True)
         config = {'sw1':sw1,'sw2':sw2,'sw3':sw3,'sw4':sw4,'sw5':sw5,'ratio_high':l_ratio_h,'win_min':l_win_min,'win_max':l_win_max,'ratio_low':l_ratio_l,'fee_min':l_fee_min,'fee_max':l_fee_max,'limit_treatment':l_treat,'no_fee_limit':l_no_fee,'profit_limit':l_profit}
 
-    if raw_b is not None:
-        # ================== 執行：日期時間篩選 ==================
+    if raw_b is not None and not raw_b.empty:
+        # ================== 執行：日期時間雙重篩選 ==================
         if datestart_b.strip() and dateend_b.strip():
             dt_start_b = pd.to_datetime(datestart_b, errors='coerce')
             dt_end_b = pd.to_datetime(dateend_b, errors='coerce')
@@ -348,11 +387,7 @@ else: # 盈亏排行
                     t_col_b = time_cols_b[0]
                     raw_b[t_col_b] = pd.to_datetime(raw_b[t_col_b], errors='coerce')
                     raw_b = raw_b[(raw_b[t_col_b] >= dt_start_b) & (raw_b[t_col_b] <= dt_end_b)]
-                    st.caption(f"🕒 已套用時間篩選：{dt_start_b} 至 {dt_end_b} (識別欄位: {t_col_b})")
-                else:
-                    st.sidebar.error("❌ 資料表中找不到有效的時間/日期欄位，無法進行過濾！")
-            else:
-                st.sidebar.warning("⚠️ 日期時間格式無法識別，請確認格式 (例: 2026/04/01 03:00)")
+                    st.caption(f"🕒 已套用雙重時間篩選：{dt_start_b} 至 {dt_end_b} (識別欄位: {t_col_b})")
         # =======================================================
 
         if selected_games_b and game_col_b:
@@ -370,12 +405,10 @@ else: # 盈亏排行
                 sort_dir = sc3.selectbox("排序方向", ["由大到小", "由小到大"], index=0, key="dir_b")
                 res = res.sort_values(by=sort_col, ascending=(sort_dir == "由小到大"))
                 
-                # 【重要修改】：表格头部增加“彩种”并调整比例
                 st.markdown("""<div class='table-header'><div style='flex:0.6'>确认</div><div style='flex:1.5'>用户名</div><div style='flex:1.5'>彩种</div><div style='flex:2.5'>异常结论</div><div style='flex:1.0'>销量</div><div style='flex:1.0'>充值</div><div style='flex:1.0'>比值</div><div style='flex:1.0'>待遇</div><div style='flex:1.0'>盈亏</div></div>""", unsafe_allow_html=True)
                 with st.container(height=500):
                     for i, row in res.iterrows():
                         u = row['用户名']; is_read = u in st.session_state.get("read_set_b", set())
-                        # 【重要修改】：栏位比例配配对
                         cols = st.columns([0.6, 1.5, 1.5, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0])
                         if cols[0].checkbox(" ", key=f"fb_{u}_{i}", value=is_read):
                             if "read_set_b" not in st.session_state: st.session_state.read_set_b = set()
@@ -383,7 +416,6 @@ else: # 盈亏排行
                         else: st.session_state.read_set_b.discard(u)
                         style = "color:#94a3b8; text-decoration:line-through;" if is_read else "color:#1e293b;"
                         
-                        # 渲染数据，新增彩种显示
                         cols[1].markdown(f"<span style='{style}'>{u}</span>", unsafe_allow_html=True)
                         cols[2].markdown(f"<span style='{style}'>{row.get('彩种', '-')}</span>", unsafe_allow_html=True)
                         cols[3].markdown(f"<span class='badge-giant'>{row['原因']}</span>", unsafe_allow_html=True)
