@@ -55,6 +55,17 @@ if not st.session_state.auth:
             else: st.error("❌ 密码错误")
     st.stop()
 
+# --- 通用列名匹配函数 (严谨修正版) ---
+def get_mapped_col(df, exact_matches, partial_matches):
+    """优先进行全字精确匹配，避免错抓(如把userId当成用户名)。若无精确匹配再使用模糊比对。"""
+    for c in df.columns:
+        if str(c).lower().strip() in [x.lower() for x in exact_matches]: 
+            return c
+    for c in df.columns:
+        if any(p.lower() in str(c).lower().strip() for p in partial_matches): 
+            return c
+    return None
+
 # --- 核心数据获取模块 (API 串接) ---
 @st.cache_data(show_spinner=False, ttl=300)
 def fetch_api_data(endpoint, d_start, d_end):
@@ -79,10 +90,7 @@ def fetch_api_data(endpoint, d_start, d_end):
         response.raise_for_status() 
         data = response.json()
         
-        # 🟢 移除了之前的 st.expander(Debug) 避免在前端印出原始碼擾亂畫面
-        
         if isinstance(data, dict):
-            # 嚴謹判斷：只有在 data 或 records 存在，且內容有數據時，才轉 DataFrame
             if "data" in data:
                 if not data["data"]: return pd.DataFrame()
                 df = pd.DataFrame(data["data"])
@@ -90,7 +98,6 @@ def fetch_api_data(endpoint, d_start, d_end):
                 if not data["records"]: return pd.DataFrame()
                 df = pd.DataFrame(data["records"])
             else:
-                # 攔截如截圖中僅回傳 {"code": 200, "platforms": [...]} 的狀況
                 st.warning("⚠️ 接口回传成功，但响应中未包含有效的会员数据。")
                 return pd.DataFrame()
         elif isinstance(data, list):
@@ -108,7 +115,7 @@ def fetch_api_data(endpoint, d_start, d_end):
         st.error(f"❌ 网络或解析异常: {e}")
         return None
 
-# --- 时间动态预设值计算 (当天的 03:00 - 隔天的 03:00) ---
+# --- 时间动态预设值计算 ---
 now = datetime.datetime.now()
 default_start = now.strftime("%Y-%m-%d 03:00:00")
 default_end = (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d 03:00:00")
@@ -118,45 +125,37 @@ def run_audit_engine(df, rules):
     try:
         df.columns = [str(c).strip() for c in df.columns]
         
-        # 🟢 方案一邏輯：精準映射與排除
-        mapping = {
-            'user': ['用户名', '账号', '会员', '玩家', 'user', 'account'],
-            'vol': ['销量', '投注', '下注', '流水'],
-            'cnt': ['单数', '次数', '笔数'],
-            'profit': ['盈亏', '盈利', '派彩', '输赢'],
-            'bonus': ['奖金', '派奖', '中奖', '返奖']
-        }
-        final_cols = {}
-        for k, aliases in mapping.items():
-            for col in df.columns:
-                if any(a.lower() in col.lower() for a in aliases): 
-                    final_cols[k] = col; break
-                
-        game_cols = [c for c in df.columns if any(g in c.lower() for g in ['彩种', '游戏', 'game', '玩法'])]
-        has_game = len(game_cols) > 0
+        # 🟢 精确获取所需列，避免 userId 被误判为用户名
+        user_col = get_mapped_col(df, ['userName', 'username', '用户名', '账号', '会员账号', '会员名'], ['user', 'account', '玩家', '会员'])
+        vol_col = get_mapped_col(df, ['betAmount', 'validBetAmount', '销量', '总销量'], ['bet', '投注', '下注', '流水', 'vol'])
+        cnt_col = get_mapped_col(df, ['betCount', '单数', '总单数'], ['count', '次数', '笔数', 'cnt'])
+        profit_col = get_mapped_col(df, ['netAmount', 'winAmount', '盈亏', '总盈亏'], ['profit', '盈利', '派彩', '输赢'])
+        bonus_col = get_mapped_col(df, ['payOut', '奖金', '总奖金'], ['bonus', '派奖', '中奖', '返奖'])
+        game_col = get_mapped_col(df, ['lotteryName', 'platform', '彩种', '平台', 'gameName'], ['lottery', 'game', '游戏', '玩法'])
 
         temp_df = pd.DataFrame()
         
-        # 🟢 【嚴謹修正】：確保用戶名完全與方案一相同，且絕對避開「彩種」
-        if 'user' in final_cols:
-            user_col = final_cols['user']
+        if user_col:
+            temp_df['用户名'] = df[user_col].astype(str)
         else:
-            safe_cols = [c for c in df.columns if c not in game_cols]
-            user_col = safe_cols[0] if safe_cols else df.columns[0]
+            safe_cols = [c for c in df.columns if c != game_col]
+            temp_df['用户名'] = df[safe_cols[0]].astype(str) if safe_cols else df.columns[0]
             
-        temp_df['用户名'] = df[user_col].astype(str)
+        def to_num(c_name):
+            if c_name and c_name in df.columns:
+                return pd.to_numeric(df[c_name].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
+            return 0.0
+
+        temp_df['销量'] = to_num(vol_col)
+        temp_df['单数'] = to_num(cnt_col)
+        temp_df['盈亏'] = to_num(profit_col)
+        temp_df['奖金'] = to_num(bonus_col)
         
-        # 🟢 【嚴謹轉換】：確保千分位取代安全運行
-        temp_df['销量'] = pd.to_numeric(df[final_cols['vol']].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0) if 'vol' in final_cols else 0.0
-        temp_df['单数'] = pd.to_numeric(df[final_cols['cnt']].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0) if 'cnt' in final_cols else 0.0
-        temp_df['盈亏'] = pd.to_numeric(df[final_cols['profit']].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0) if 'profit' in final_cols else 0.0
-        temp_df['奖金'] = pd.to_numeric(df[final_cols['bonus']].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0) if 'bonus' in final_cols else 0.0
-        
-        if has_game:
-            temp_df['彩种'] = df[game_cols[0]].astype(str)
+        if game_col:
+            temp_df['彩种'] = df[game_col].astype(str)
 
         agg_dict = {'销量':'sum', '单数':'sum', '盈亏':'sum', '奖金':'sum'}
-        if has_game:
+        if game_col:
             agg_dict['彩种'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
 
         grouped = temp_df.groupby('用户名').agg(agg_dict).reset_index()
@@ -194,37 +193,41 @@ def run_strict_audit(df, cfg):
         df.columns = [str(c).strip() for c in df.columns]
         last_col = df.columns[-1]
         
-        game_cols = [c for c in df.columns if any(g in c.lower() for g in ['彩种', '游戏', 'game', '玩法'])]
-        has_game = len(game_cols) > 0
+        # 🟢 精确获取列，解决盈亏排行 API 找不到彩种(Platform)和用户名错抓问题
+        user_col = get_mapped_col(df, ['userName', 'username', '用户名', '账号', '会员账号', '会员名'], ['user', 'account', '玩家', '会员'])
+        game_col = get_mapped_col(df, ['lotteryName', 'platform', '彩种', '平台', 'gameName'], ['lottery', 'game', '游戏', '玩法'])
 
         clean_df = pd.DataFrame()
         
-        # 🟢 方案一邏輯：同步引擎 A ，精確定位會員名
-        possible_users = [c for c in df.columns if any(a in c.lower() for a in ['用户名', '账号', '会员', '玩家', 'user', 'account'])]
-        if possible_users:
-            user_col = possible_users[0]
+        if user_col:
+            clean_df['用户名'] = df[user_col].astype(str)
         else:
-            safe_cols = [c for c in df.columns if c not in game_cols]
-            user_col = safe_cols[0] if safe_cols else df.columns[0]
+            safe_cols = [c for c in df.columns if c != game_col]
+            clean_df['用户名'] = df[safe_cols[0]].astype(str) if safe_cols else df.columns[0]
             
-        clean_df['用户名'] = df[user_col].astype(str)
+        def get_col_val(keywords_exact, keywords_partial):
+            col = get_mapped_col(df, keywords_exact, keywords_partial)
+            if col:
+                return pd.to_numeric(df[col].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
+            return pd.Series([0.0]*len(df), index=df.index)
+
+        # 兼容中文与 API 英文列名，确保必定拿到数值
+        clean_df['个人充值手续费'] = get_col_val(['个人充值手续费', '充值手续费', '充值', 'depositAmount', 'deposit'], ['充值', 'deposit'])
+        clean_df['个人派奖'] = get_col_val(['个人派奖', '派奖', '总派奖', '销量', 'betAmount', 'validBetAmount'], ['派奖', 'payOut', '销量', 'bet'])
+        clean_df['个人自身返点/返水'] = get_col_val(['个人自身返点/返水', '个人自身返点', '个人返水', '返点', '返水'], ['返点', '返水', 'rebate'])
+        clean_df['个人系统分红'] = get_col_val(['个人系统分红', '系统分红', '分红'], ['分红', 'dividend'])
         
-        target_cols = ['个人充值手续费', '个人派奖', '个人自身返点/返水', '个人系统分红']
+        profit_col = get_mapped_col(df, ['netAmount', 'winAmount', '盈亏', '总盈亏'], ['profit', '盈利', '派彩'])
+        if profit_col:
+            clean_df['盈亏'] = pd.to_numeric(df[profit_col].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
+        else:
+            clean_df['盈亏'] = pd.to_numeric(df[last_col].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
         
-        # 🟢 【嚴謹修正】：解決 int object has no attribute fillna 報錯
-        for col in target_cols: 
-            if col in df.columns:
-                clean_df[col] = pd.to_numeric(df[col].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
-            else:
-                clean_df[col] = 0.0
-                
-        clean_df['盈亏'] = pd.to_numeric(df[last_col].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
-        
-        if has_game:
-            clean_df['彩种'] = df[game_cols[0]].astype(str)
+        if game_col:
+            clean_df['彩种'] = df[game_col].astype(str)
 
         agg_dict = {'个人充值手续费':'sum','个人派奖':'sum','个人自身返点/返水':'sum','个人系统分红':'sum','盈亏':'sum'}
-        if has_game:
+        if game_col:
             agg_dict['彩种'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
 
         grouped = clean_df.groupby('用户名').agg(agg_dict).reset_index()
@@ -296,9 +299,9 @@ if mode == "用户彩票分析":
             st.session_state.read_set_a = set()
             st.session_state.last_req_a = req_hash
             
-        game_cols = [c for c in raw.columns if any(g in c.lower() for g in ['彩种', '游戏', 'game', '玩法'])]
-        if game_cols:
-            game_col = game_cols[0]
+        # 🟢 使用严谨匹配获取彩种/平台列
+        game_col = get_mapped_col(raw, ['lotteryName', 'platform', '彩种', '平台', 'gameName'], ['lottery', 'game', '游戏', '玩法'])
+        if game_col:
             all_games = sorted(raw[game_col].astype(str).dropna().unique().tolist())
 
     with st.sidebar:
@@ -324,7 +327,6 @@ if mode == "用户彩票分析":
                 dt_end_a = pd.to_datetime(dateend_a, errors='coerce')
                 
                 if pd.notna(dt_start_a) and pd.notna(dt_end_a):
-                    # 🟢 如果使用者只輸入日期 (長度<=10)，自動補齊 23:59:59，若有具體時間則尊重輸入值
                     if len(dateend_a.strip()) <= 10:
                         dt_end_a = dt_end_a.replace(hour=23, minute=59, second=59)
                         
@@ -410,9 +412,9 @@ else: # 盈亏排行
             st.session_state.read_set_b = set()
             st.session_state.last_req_b = req_hash_b
             
-        game_cols_b = [c for c in raw_b.columns if any(g in c.lower() for g in ['彩种', '游戏', 'game', '玩法'])]
-        if game_cols_b:
-            game_col_b = game_cols_b[0]
+        # 🟢 使用严谨匹配获取彩种/平台列
+        game_col_b = get_mapped_col(raw_b, ['lotteryName', 'platform', '彩种', '平台', 'gameName'], ['lottery', 'game', '游戏', '玩法'])
+        if game_col_b:
             all_games_b = sorted(raw_b[game_col_b].astype(str).dropna().unique().tolist())
 
     with st.sidebar:
@@ -449,7 +451,6 @@ else: # 盈亏排行
                 dt_end_b = pd.to_datetime(dateend_b, errors='coerce')
                 
                 if pd.notna(dt_start_b) and pd.notna(dt_end_b):
-                    # 🟢 如果使用者只輸入日期 (長度<=10)，自動補齊 23:59:59，若有具體時間則尊重輸入值
                     if len(dateend_b.strip()) <= 10:
                         dt_end_b = dt_end_b.replace(hour=23, minute=59, second=59)
                         
