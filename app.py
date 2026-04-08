@@ -79,7 +79,6 @@ def fetch_api_data(endpoint, d_start, d_end):
         response.raise_for_status() 
         data = response.json()
         
-        # 🟢 【严谨验证：将 API 原始回传结果印在前端供审计】
         with st.expander("🛠️ 展开查看 API 原始回传数据 (Debug)", expanded=False):
             st.json(data)
         
@@ -101,17 +100,17 @@ def fetch_api_data(endpoint, d_start, d_end):
         st.error(f"❌ 网络或解析异常: {e}")
         return None
 
-# --- 时间动态预设值计算 (扩大日期范围测试) ---
+# --- 时间动态预设值计算 (当天的 03:00 - 隔天的 03:00) ---
 now = datetime.datetime.now()
-# 預設查詢過去 30 天的資料，確保數據不會因為當天空白而顯示無資料
-default_start = (now - datetime.timedelta(days=30)).strftime("%Y-%m-%d")
-default_end = (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+default_start = now.strftime("%Y-%m-%d 03:00:00")
+default_end = (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d 03:00:00")
 
 # --- 核心引擎 A ---
 def run_audit_engine(df, rules):
     try:
         df.columns = [str(c).strip() for c in df.columns]
-        # 擴充映射詞庫，增加容錯率
+        
+        # 🟢 方案一邏輯：精準映射與排除
         mapping = {
             'user': ['用户名', '账号', '会员', '玩家', 'user', 'account'],
             'vol': ['销量', '投注', '下注', '流水'],
@@ -130,17 +129,16 @@ def run_audit_engine(df, rules):
 
         temp_df = pd.DataFrame()
         
-        # 🟢 【嚴謹修正 1】：安全提取用戶名，避免抓取到彩種
+        # 🟢 【嚴謹修正】：確保用戶名完全與方案一相同，且絕對避開「彩種」
         if 'user' in final_cols:
             user_col = final_cols['user']
         else:
-            # 排除已被判定為彩種的欄位後，取第一個剩餘欄位當作備用
-            remaining_cols = [c for c in df.columns if c not in game_cols]
-            user_col = remaining_cols[0] if remaining_cols else df.columns[0]
+            safe_cols = [c for c in df.columns if c not in game_cols]
+            user_col = safe_cols[0] if safe_cols else df.columns[0]
             
         temp_df['用户名'] = df[user_col].astype(str)
         
-        # 🟢 加入 regex=True 規範化千分位符號的清除，避免正則警告
+        # 🟢 【嚴謹轉換】：確保千分位取代安全運行
         temp_df['销量'] = pd.to_numeric(df[final_cols['vol']].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0) if 'vol' in final_cols else 0.0
         temp_df['单数'] = pd.to_numeric(df[final_cols['cnt']].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0) if 'cnt' in final_cols else 0.0
         temp_df['盈亏'] = pd.to_numeric(df[final_cols['profit']].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0) if 'profit' in final_cols else 0.0
@@ -193,28 +191,25 @@ def run_strict_audit(df, cfg):
 
         clean_df = pd.DataFrame()
         
-        # 🟢 【嚴謹修正 1】：同步引擎 A 邏輯，避免用戶名錯抓為彩種
+        # 🟢 方案一邏輯：同步引擎 A ，精確定位會員名
         possible_users = [c for c in df.columns if any(a in c.lower() for a in ['用户名', '账号', '会员', '玩家', 'user', 'account'])]
         if possible_users:
             user_col = possible_users[0]
         else:
-            remaining_cols = [c for c in df.columns if c not in game_cols]
-            user_col = remaining_cols[0] if remaining_cols else df.columns[0]
+            safe_cols = [c for c in df.columns if c not in game_cols]
+            user_col = safe_cols[0] if safe_cols else df.columns[0]
             
         clean_df['用户名'] = df[user_col].astype(str)
         
         target_cols = ['个人充值手续费', '个人派奖', '个人自身返点/返水', '个人系统分红']
         
-        # 🟢 【嚴謹修正 2】：解決 int object has no attribute fillna 報錯
+        # 🟢 【嚴謹修正】：解決 int object has no attribute fillna 報錯
         for col in target_cols: 
             if col in df.columns:
-                # 確保是針對 Pandas Series 進行操作
                 clean_df[col] = pd.to_numeric(df[col].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
             else:
-                # 欄位缺失時，直接賦予標量 0.0，避免調用不存在的屬性
                 clean_df[col] = 0.0
                 
-        # 最後一欄(盈虧)也加上千分位清理以防資料污染
         clean_df['盈亏'] = pd.to_numeric(df[last_col].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
         
         if has_game:
@@ -321,7 +316,10 @@ if mode == "用户彩票分析":
                 dt_end_a = pd.to_datetime(dateend_a, errors='coerce')
                 
                 if pd.notna(dt_start_a) and pd.notna(dt_end_a):
-                    dt_end_a = dt_end_a.replace(hour=23, minute=59, second=59)
+                    # 🟢 如果使用者只輸入日期 (長度<=10)，自動補齊 23:59:59，若有具體時間則尊重輸入值
+                    if len(dateend_a.strip()) <= 10:
+                        dt_end_a = dt_end_a.replace(hour=23, minute=59, second=59)
+                        
                     time_cols = [c for c in raw.columns if any(k in str(c).lower() for k in ['时间', '日期', 'date', 'time', '下注时间', '派彩时间', '创建时间'])]
                     if time_cols:
                         t_col = time_cols[0]
@@ -443,7 +441,10 @@ else: # 盈亏排行
                 dt_end_b = pd.to_datetime(dateend_b, errors='coerce')
                 
                 if pd.notna(dt_start_b) and pd.notna(dt_end_b):
-                    dt_end_b = dt_end_b.replace(hour=23, minute=59, second=59)
+                    # 🟢 如果使用者只輸入日期 (長度<=10)，自動補齊 23:59:59，若有具體時間則尊重輸入值
+                    if len(dateend_b.strip()) <= 10:
+                        dt_end_b = dt_end_b.replace(hour=23, minute=59, second=59)
+                        
                     time_cols_b = [c for c in raw_b.columns if any(k in str(c).lower() for k in ['时间', '日期', 'date', 'time', '下注时间', '派彩时间', '创建时间'])]
                     if time_cols_b:
                         t_col_b = time_cols_b[0]
