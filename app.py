@@ -53,11 +53,12 @@ if not st.session_state.auth:
 
 # --- 核心数据获取模块 (API 串接) ---
 @st.cache_data(show_spinner=False, ttl=300)
-def fetch_api_data(endpoint, d_start, d_end):
+def fetch_api_data(endpoint, d_start, d_end, platform):
     """通用 API 数据获取函数，带缓存避免频繁请求"""
     # 去除时间字符串首尾空格，防止拼接错误
     d_start = str(d_start).strip()
     d_end = str(d_end).strip()
+    platform = str(platform).strip()
     
     headers = {
         "Authorization": "Bearer sk-d79a713caf53e8bdh3154a596ca1a0166234df7",
@@ -67,7 +68,8 @@ def fetch_api_data(endpoint, d_start, d_end):
     
     params = {
         "dateStart": d_start,
-        "dateEnd": d_end
+        "dateEnd": d_end,
+        "platform": platform
     }
     
     try:
@@ -233,6 +235,9 @@ if mode == "用户彩票分析":
         datestart_a = col_st.text_input("开始时间", value=default_start, key="ds_a")
         dateend_a = col_et.text_input("结束时间", value=default_end, key="de_a")
         
+        # 新增的平台输入框
+        platform_a = st.text_input("平台 (多平台请用逗号分隔)", value="XO", key="plat_a")
+        
         if st.button("🔄 重新拉取 API 数据", use_container_width=True):
             st.cache_data.clear()
             
@@ -246,11 +251,12 @@ if mode == "用户彩票分析":
     # API 自动数据拉取
     api_url_a = "https://stats-crawler.up.railway.app/api/open/lottery-analysis"
     with st.spinner("正在向 API 请求最新彩票分析数据，请稍候..."):
-        raw = fetch_api_data(api_url_a, datestart_a, dateend_a)
+        # 调用时传入 platform_a
+        raw = fetch_api_data(api_url_a, datestart_a, dateend_a, platform_a)
 
     if raw is not None and not raw.empty:
         # 使用查询参数的 Hash 来维护已读状态
-        req_hash = hashlib.md5(f"{datestart_a}_{dateend_a}".encode()).hexdigest()
+        req_hash = hashlib.md5(f"{datestart_a}_{dateend_a}_{platform_a}".encode()).hexdigest()
         if st.session_state.get("last_req_a") != req_hash:
             st.session_state.read_set_a = set()
             st.session_state.last_req_a = req_hash
@@ -340,6 +346,9 @@ else: # 盈亏排行
         datestart_b = col_st.text_input("开始时间", value=default_start, key="ds_b")
         dateend_b = col_et.text_input("结束时间", value=default_end, key="de_b")
         
+        # 新增的平台输入框
+        platform_b = st.text_input("平台 (多平台请用逗号分隔)", value="XO", key="plat_b")
+        
         if st.button("🔄 重新拉取 API 数据", key="refresh_b", use_container_width=True):
             st.cache_data.clear()
             
@@ -353,10 +362,11 @@ else: # 盈亏排行
     # API 自动数据拉取
     api_url_b = "https://stats-crawler.up.railway.app/api/open/member-income"
     with st.spinner("正在向 API 请求盈亏排行数据，请稍候..."):
-        raw_b = fetch_api_data(api_url_b, datestart_b, dateend_b)
+        # 调用时传入 platform_b
+        raw_b = fetch_api_data(api_url_b, datestart_b, dateend_b, platform_b)
 
     if raw_b is not None and not raw_b.empty:
-        req_hash_b = hashlib.md5(f"{datestart_b}_{dateend_b}".encode()).hexdigest()
+        req_hash_b = hashlib.md5(f"{datestart_b}_{dateend_b}_{platform_b}".encode()).hexdigest()
         if st.session_state.get("last_req_b") != req_hash_b:
             st.session_state.read_set_b = set()
             st.session_state.last_req_b = req_hash_b
