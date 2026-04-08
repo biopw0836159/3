@@ -79,18 +79,26 @@ def fetch_api_data(endpoint, d_start, d_end):
         response.raise_for_status() 
         data = response.json()
         
-        with st.expander("🛠️ 展开查看 API 原始回传数据 (Debug)", expanded=False):
-            st.json(data)
+        # 🟢 移除了之前的 st.expander(Debug) 避免在前端印出原始碼擾亂畫面
         
         if isinstance(data, dict):
+            # 嚴謹判斷：只有在 data 或 records 存在，且內容有數據時，才轉 DataFrame
             if "data" in data:
+                if not data["data"]: return pd.DataFrame()
                 df = pd.DataFrame(data["data"])
             elif "records" in data:
+                if not data["records"]: return pd.DataFrame()
                 df = pd.DataFrame(data["records"])
             else:
-                df = pd.DataFrame([data])
-        else:
+                # 攔截如截圖中僅回傳 {"code": 200, "platforms": [...]} 的狀況
+                st.warning("⚠️ 接口回传成功，但响应中未包含有效的会员数据。")
+                return pd.DataFrame()
+        elif isinstance(data, list):
+            if not data: return pd.DataFrame()
             df = pd.DataFrame(data)
+        else:
+            st.warning("⚠️ 接口回传格式异常，无法解析。")
+            return pd.DataFrame()
             
         return df
     except requests.exceptions.HTTPError as e:
