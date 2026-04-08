@@ -53,12 +53,10 @@ if not st.session_state.auth:
 
 # --- 核心数据获取模块 (API 串接) ---
 @st.cache_data(show_spinner=False, ttl=300)
-def fetch_api_data(endpoint, d_start, d_end, platform):
-    """通用 API 数据获取函数，带缓存避免频繁请求"""
-    # 去除时间字符串首尾空格，防止拼接错误
+def fetch_api_data(endpoint, d_start, d_end):
+    """通用 API 数据获取函数，带缓存避免频繁请求 (已移除平台限制)"""
     d_start = str(d_start).strip()
     d_end = str(d_end).strip()
-    platform = str(platform).strip()
     
     headers = {
         "Authorization": "Bearer sk-d79a713caf53e8bdh3154a596ca1a0166234df7",
@@ -68,20 +66,14 @@ def fetch_api_data(endpoint, d_start, d_end, platform):
     
     params = {
         "dateStart": d_start,
-        "dateEnd": d_end,
-        "platform": platform
+        "dateEnd": d_end
     }
     
     try:
-        # 使用 timeout 防止请求无限挂起
         response = requests.get(endpoint, params=params, headers=headers, timeout=30)
-        
-        # 如果返回 400 等错误，这里会抛出异常
         response.raise_for_status() 
-        
         data = response.json()
         
-        # 兼容处理常见的 API JSON 数据包裹结构
         if isinstance(data, dict):
             if "data" in data:
                 df = pd.DataFrame(data["data"])
@@ -94,7 +86,6 @@ def fetch_api_data(endpoint, d_start, d_end, platform):
             
         return df
     except requests.exceptions.HTTPError as e:
-        # 捕获具体的 HTTP 错误并输出后端返回的错误信息
         st.error(f"❌ 接口响应错误 (HTTP {e.response.status_code}): {e.response.text}")
         return None
     except Exception as e:
@@ -103,7 +94,6 @@ def fetch_api_data(endpoint, d_start, d_end, platform):
 
 # --- 时间动态预设值计算 ---
 now = datetime.datetime.now()
-# 修改为只输出简单的 YYYY-MM-DD 日期格式
 default_start = now.strftime("%Y-%m-%d")
 default_end = (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -117,24 +107,22 @@ def run_audit_engine(df, rules):
             for col in df.columns:
                 if any(a in col for a in aliases): final_cols[k] = col; break
                 
-        # 提取彩种字段
         game_cols = [c for c in df.columns if c in ['彩种', '游戏', '彩种名称', 'Game']]
         has_game = len(game_cols) > 0
 
         temp_df = pd.DataFrame()
-        temp_df['用户名'] = df[final_cols['user']].astype(str)
-        temp_df['销量'] = pd.to_numeric(df[final_cols['vol']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-        temp_df['单数'] = pd.to_numeric(df[final_cols['cnt']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-        temp_df['盈亏'] = pd.to_numeric(df[final_cols['profit']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-        temp_df['奖金'] = pd.to_numeric(df[final_cols['bonus']].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+        # 加入 fallback 机制，避免因 API 栏位遗漏导致引擎当机崩溃
+        temp_df['用户名'] = df[final_cols['user']].astype(str) if final_cols.get('user') else df.iloc[:,0].astype(str)
+        temp_df['销量'] = pd.to_numeric(df[final_cols['vol']].astype(str).str.replace(',', ''), errors='coerce').fillna(0) if final_cols.get('vol') else 0
+        temp_df['单数'] = pd.to_numeric(df[final_cols['cnt']].astype(str).str.replace(',', ''), errors='coerce').fillna(0) if final_cols.get('cnt') else 0
+        temp_df['盈亏'] = pd.to_numeric(df[final_cols['profit']].astype(str).str.replace(',', ''), errors='coerce').fillna(0) if final_cols.get('profit') else 0
+        temp_df['奖金'] = pd.to_numeric(df[final_cols['bonus']].astype(str).str.replace(',', ''), errors='coerce').fillna(0) if final_cols.get('bonus') else 0
         
         if has_game:
             temp_df['彩种'] = df[game_cols[0]].astype(str)
 
-        # 聚合规则
         agg_dict = {'销量':'sum', '单数':'sum', '盈亏':'sum', '奖金':'sum'}
         if has_game:
-            # 收集该用户玩过的所有彩种并去重
             agg_dict['彩种'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
 
         grouped = temp_df.groupby('用户名').agg(agg_dict).reset_index()
@@ -162,6 +150,7 @@ def run_audit_engine(df, rules):
         grouped['原因'] = grouped.apply(apply_logic, axis=1)
         return grouped[grouped['原因'].notna()].copy()
     except Exception as e: 
+        st.error(f"引擎 A 解析异常: {e}")
         return None
 
 # --- 核心引擎 B ---
@@ -170,20 +159,20 @@ def run_strict_audit(df, cfg):
         df.columns = [str(c).strip() for c in df.columns]
         last_col = df.columns[-1]
         
-        # 提取彩种字段
         game_cols = [c for c in df.columns if c in ['彩种', '游戏', '彩种名称', 'Game']]
         has_game = len(game_cols) > 0
 
         clean_df = pd.DataFrame()
-        clean_df['用户名'] = df['用户名'].astype(str)
+        clean_df['用户名'] = df['用户名'].astype(str) if '用户名' in df.columns else df.iloc[:,0].astype(str)
         target_cols = ['个人充值手续费', '个人派奖', '个人自身返点/返水', '个人系统分红']
-        for col in target_cols: clean_df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        for col in target_cols: 
+            # 使用 .get 避免缺失字段时报错当机
+            clean_df[col] = pd.to_numeric(df.get(col, 0), errors='coerce').fillna(0)
         clean_df['盈亏'] = pd.to_numeric(df[last_col], errors='coerce').fillna(0)
         
         if has_game:
             clean_df['彩种'] = df[game_cols[0]].astype(str)
 
-        # 聚合规则
         agg_dict = {'个人充值手续费':'sum','个人派奖':'sum','个人自身返点/返水':'sum','个人系统分红':'sum','盈亏':'sum'}
         if has_game:
             agg_dict['彩种'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
@@ -213,6 +202,7 @@ def run_strict_audit(df, cfg):
         grouped['充销比'] = grouped.apply(lambda x: x['销量']/x['充值'] if x['充值']>0 else 0, axis=1)
         return grouped[grouped['原因'].notna()].copy()
     except Exception as e: 
+        st.error(f"引擎 B 解析异常: {e}")
         return None
 
 # 4. 侧边栏导航
@@ -235,9 +225,6 @@ if mode == "用户彩票分析":
         datestart_a = col_st.text_input("开始时间", value=default_start, key="ds_a")
         dateend_a = col_et.text_input("结束时间", value=default_end, key="de_a")
         
-        # 新增的平台输入框
-        platform_a = st.text_input("平台 (多平台请用逗号分隔)", value="XO", key="plat_a")
-        
         if st.button("🔄 重新拉取 API 数据", use_container_width=True):
             st.cache_data.clear()
             
@@ -248,15 +235,12 @@ if mode == "用户彩票分析":
     game_col = None
     selected_games = []
 
-    # API 自动数据拉取
     api_url_a = "https://stats-crawler.up.railway.app/api/open/lottery-analysis"
     with st.spinner("正在向 API 请求最新彩票分析数据，请稍候..."):
-        # 调用时传入 platform_a
-        raw = fetch_api_data(api_url_a, datestart_a, dateend_a, platform_a)
+        raw = fetch_api_data(api_url_a, datestart_a, dateend_a)
 
     if raw is not None and not raw.empty:
-        # 使用查询参数的 Hash 来维护已读状态
-        req_hash = hashlib.md5(f"{datestart_a}_{dateend_a}_{platform_a}".encode()).hexdigest()
+        req_hash = hashlib.md5(f"{datestart_a}_{dateend_a}".encode()).hexdigest()
         if st.session_state.get("last_req_a") != req_hash:
             st.session_state.read_set_a = set()
             st.session_state.last_req_a = req_hash
@@ -275,66 +259,76 @@ if mode == "用户彩票分析":
         c_on = st.toggle("单数限制", False); c_limit = st.number_input("单数 ≤", 12)
         p_on = st.toggle("盈亏限制", False); p_min = st.number_input("Min盈亏", 100000.0); p_max = st.number_input("Max盈亏", 1000000.0)
         r_on = st.toggle("RTP限制", False); r_min = st.number_input("Min RTP", 0.995, format="%.3f"); r_max = st.number_input("Max RTP", 1.000, format="%.3f")
-        manual_btn = st.button("🔥 执行审计", type="primary")
+        manual_btn = st.button("🔥 执行审计", type="primary", use_container_width=True)
         rules = {'use_manual':use_manual, 'v_on':v_on, 'v_min':v_min, 'v_max':v_max, 'c_on':c_on, 'c_limit':c_limit, 'p_on':p_on, 'p_min':p_min, 'p_max':p_max, 'r_on':r_on, 'r_min':r_min, 'r_max':r_max}
 
-    if raw is not None and not raw.empty:
-        # ================== 執行：日期時間雙重篩選 (保障數據純淨度) ==================
-        if datestart_a.strip() and dateend_a.strip():
-            dt_start_a = pd.to_datetime(datestart_a, errors='coerce')
-            dt_end_a = pd.to_datetime(dateend_a, errors='coerce')
-            
-            if pd.notna(dt_start_a) and pd.notna(dt_end_a):
-                time_cols = [c for c in raw.columns if any(k in str(c).lower() for k in ['时间', '日期', 'date', 'time', '下注时间', '派彩时间', '创建时间'])]
-                if time_cols:
-                    t_col = time_cols[0]
-                    raw[t_col] = pd.to_datetime(raw[t_col], errors='coerce')
-                    raw = raw[(raw[t_col] >= dt_start_a) & (raw[t_col] <= dt_end_a)]
-                    st.caption(f"🕒 已套用雙重時間篩選：{dt_start_a.date()} 至 {dt_end_a.date()} (识别栏位: {t_col})")
-        # =======================================================
+    # 真正的事件绑定：必須點擊按鈕後才觸發顯示，避免沒反應
+    if manual_btn: st.session_state.trigger_a = True
 
-        if selected_games and game_col:
-            raw = raw[raw[game_col].isin(selected_games)]
-            st.caption(f"📍 当前已筛选彩种: {', '.join(selected_games)}")
-            
-        st.session_state.res_data_a = run_audit_engine(raw, rules)
-        
-        res = st.session_state.get("res_data_a")
-        if res is not None and not res.empty:
-            st.markdown("### 🚨 异常捕获实况")
-            k1, k2, k3, k4, k5 = st.columns(5)
-            k1.markdown(f"<div class='metric-card-a'><div class='metric-value'>{len(res)}</div><div class='metric-label'>锁定异常总数</div></div>", unsafe_allow_html=True)
-            k2.markdown(f"<div class='metric-card-a'><div class='metric-value'>{len(res[res['原因'].str.contains('刷人数')])}</div><div class='metric-label'>疑似刷人数</div></div>", unsafe_allow_html=True)
-            k3.markdown(f"<div class='metric-card-a'><div class='metric-value'>{len(res[res['原因'].str.contains('刷量')])}</div><div class='metric-label'>疑似刷量</div></div>", unsafe_allow_html=True)
-            k4.markdown(f"<div class='metric-card-a'><div class='metric-value'>{len(res[res['原因'].str.contains('盈利')])}</div><div class='metric-label'>盈利大会员</div></div>", unsafe_allow_html=True)
-            k5.markdown(f"<div class='metric-card-a'><div class='metric-value'>{len(res[res['原因'].str.contains('对刷')])}</div><div class='metric-label'>疑似对刷</div></div>", unsafe_allow_html=True)
-            st.write("---")
-            sc1, sc2, sc3 = st.columns([1, 2, 2])
-            sort_col = sc2.selectbox("排序字段", ["销量", "盈亏", "单数", "RTP"], index=0, key="sort_a")
-            sort_dir = sc3.selectbox("排序顺序", ["由大到小", "由小到大"], index=0, key="dir_a")
-            res = res.sort_values(by=sort_col, ascending=(sort_dir == "由小到大"))
-            
-            st.markdown("""<div class='table-header'><div style='flex:0.6'>核查</div><div style='flex:1.5'>用户名</div><div style='flex:1.5'>彩种</div><div style='flex:2.5'>原因</div><div style='flex:1.2'>总销量</div><div style='flex:1.0'>单数</div><div style='flex:1.2'>盈亏</div><div style='flex:1.0'>RTP</div></div>""", unsafe_allow_html=True)
-            with st.container(height=500):
-                for i, row in res.iterrows():
-                    u = row['用户名']; is_read = u in st.session_state.get("read_set_a", set())
-                    cols = st.columns([0.6, 1.5, 1.5, 2.5, 1.2, 1.0, 1.2, 1.0])
-                    if cols[0].checkbox(" ", key=f"ka_{u}_{i}", value=is_read): 
-                        if "read_set_a" not in st.session_state: st.session_state.read_set_a = set()
-                        st.session_state.read_set_a.add(u)
-                    else: st.session_state.read_set_a.discard(u)
-                    style = "color:#94a3b8; text-decoration:line-through;" if is_read else "color:#1e293b;"
+    if st.session_state.get('trigger_a', False) and raw is not None:
+        if raw.empty:
+            st.warning("⚠️ 查无 API 初始数据。")
+        else:
+            # ================== 執行：日期時間雙重篩選 ==================
+            if datestart_a.strip() and dateend_a.strip():
+                dt_start_a = pd.to_datetime(datestart_a, errors='coerce')
+                dt_end_a = pd.to_datetime(dateend_a, errors='coerce')
+                
+                if pd.notna(dt_start_a) and pd.notna(dt_end_a):
+                    # 【重要修正】結束時間補足至 23:59:59，避免漏算當天數據
+                    dt_end_a = dt_end_a.replace(hour=23, minute=59, second=59)
+                    time_cols = [c for c in raw.columns if any(k in str(c).lower() for k in ['时间', '日期', 'date', 'time', '下注时间', '派彩时间', '创建时间'])]
+                    if time_cols:
+                        t_col = time_cols[0]
+                        raw[t_col] = pd.to_datetime(raw[t_col], errors='coerce')
+                        raw = raw[(raw[t_col] >= dt_start_a) & (raw[t_col] <= dt_end_a)]
+            # =======================================================
+
+            if selected_games and game_col:
+                raw = raw[raw[game_col].isin(selected_games)]
+                
+            if raw.empty:
+                st.warning("⚠️ 经过时间或彩种条件筛选后，查无符合的数据。请放宽筛选条件。")
+            else:
+                st.session_state.res_data_a = run_audit_engine(raw, rules)
+                res = st.session_state.get("res_data_a")
+                
+                if res is not None and not res.empty:
+                    st.markdown("### 🚨 异常捕获实况")
+                    k1, k2, k3, k4, k5 = st.columns(5)
+                    k1.markdown(f"<div class='metric-card-a'><div class='metric-value'>{len(res)}</div><div class='metric-label'>锁定异常总数</div></div>", unsafe_allow_html=True)
+                    k2.markdown(f"<div class='metric-card-a'><div class='metric-value'>{len(res[res['原因'].str.contains('刷人数')])}</div><div class='metric-label'>疑似刷人数</div></div>", unsafe_allow_html=True)
+                    k3.markdown(f"<div class='metric-card-a'><div class='metric-value'>{len(res[res['原因'].str.contains('刷量')])}</div><div class='metric-label'>疑似刷量</div></div>", unsafe_allow_html=True)
+                    k4.markdown(f"<div class='metric-card-a'><div class='metric-value'>{len(res[res['原因'].str.contains('盈利')])}</div><div class='metric-label'>盈利大会员</div></div>", unsafe_allow_html=True)
+                    k5.markdown(f"<div class='metric-card-a'><div class='metric-value'>{len(res[res['原因'].str.contains('对刷')])}</div><div class='metric-label'>疑似对刷</div></div>", unsafe_allow_html=True)
+                    st.write("---")
+                    sc1, sc2, sc3 = st.columns([1, 2, 2])
+                    sort_col = sc2.selectbox("排序字段", ["销量", "盈亏", "单数", "RTP"], index=0, key="sort_a")
+                    sort_dir = sc3.selectbox("排序顺序", ["由大到小", "由小到大"], index=0, key="dir_a")
+                    res = res.sort_values(by=sort_col, ascending=(sort_dir == "由小到大"))
                     
-                    cols[1].markdown(f"<span style='{style}'>{u}</span>", unsafe_allow_html=True)
-                    cols[2].markdown(f"<span style='{style}'>{row.get('彩种', '-')}</span>", unsafe_allow_html=True)
-                    cols[3].markdown(f"<span class='badge-red'>{row['原因']}</span>", unsafe_allow_html=True)
-                    cols[4].markdown(f"<span style='{style}'>{row['销量']:,.0f}</span>", unsafe_allow_html=True)
-                    cols[5].markdown(f"<span style='{style}'>{int(row['单数'])}</span>", unsafe_allow_html=True)
-                    cols[6].markdown(f"<span style='{style}'>{row['盈亏']:,.0f}</span>", unsafe_allow_html=True)
-                    cols[7].markdown(f"<span style='{style}'>{row['RTP']:.3f}</span>", unsafe_allow_html=True)
-                    st.divider()
-            st.download_button("📥 导出结果", res.to_csv(index=False).encode('utf-8-sig'), "audit_a.csv")
-        elif res is not None: st.success("✅ 扫描完毕，未发现异常。")
+                    st.markdown("""<div class='table-header'><div style='flex:0.6'>核查</div><div style='flex:1.5'>用户名</div><div style='flex:1.5'>彩种</div><div style='flex:2.5'>原因</div><div style='flex:1.2'>总销量</div><div style='flex:1.0'>单数</div><div style='flex:1.2'>盈亏</div><div style='flex:1.0'>RTP</div></div>""", unsafe_allow_html=True)
+                    with st.container(height=500):
+                        for i, row in res.iterrows():
+                            u = row['用户名']; is_read = u in st.session_state.get("read_set_a", set())
+                            cols = st.columns([0.6, 1.5, 1.5, 2.5, 1.2, 1.0, 1.2, 1.0])
+                            if cols[0].checkbox(" ", key=f"ka_{u}_{i}", value=is_read): 
+                                if "read_set_a" not in st.session_state: st.session_state.read_set_a = set()
+                                st.session_state.read_set_a.add(u)
+                            else: st.session_state.read_set_a.discard(u)
+                            style = "color:#94a3b8; text-decoration:line-through;" if is_read else "color:#1e293b;"
+                            
+                            cols[1].markdown(f"<span style='{style}'>{u}</span>", unsafe_allow_html=True)
+                            cols[2].markdown(f"<span style='{style}'>{row.get('彩种', '-')}</span>", unsafe_allow_html=True)
+                            cols[3].markdown(f"<span class='badge-red'>{row['原因']}</span>", unsafe_allow_html=True)
+                            cols[4].markdown(f"<span style='{style}'>{row['销量']:,.0f}</span>", unsafe_allow_html=True)
+                            cols[5].markdown(f"<span style='{style}'>{int(row['单数'])}</span>", unsafe_allow_html=True)
+                            cols[6].markdown(f"<span style='{style}'>{row['盈亏']:,.0f}</span>", unsafe_allow_html=True)
+                            cols[7].markdown(f"<span style='{style}'>{row['RTP']:.3f}</span>", unsafe_allow_html=True)
+                            st.divider()
+                    st.download_button("📥 导出结果", res.to_csv(index=False).encode('utf-8-sig'), "audit_a.csv")
+                elif res is not None: 
+                    st.success("✅ 扫描完毕，当前筛选条件下未发现任何符合的异常账号。")
 
 else: # 盈亏排行
     st.markdown("<div class='title-banner'><h1>📈 盈亏排行审计 (API数据源)</h1></div>", unsafe_allow_html=True)
@@ -346,9 +340,6 @@ else: # 盈亏排行
         datestart_b = col_st.text_input("开始时间", value=default_start, key="ds_b")
         dateend_b = col_et.text_input("结束时间", value=default_end, key="de_b")
         
-        # 新增的平台输入框
-        platform_b = st.text_input("平台 (多平台请用逗号分隔)", value="XO", key="plat_b")
-        
         if st.button("🔄 重新拉取 API 数据", key="refresh_b", use_container_width=True):
             st.cache_data.clear()
             
@@ -359,14 +350,12 @@ else: # 盈亏排行
     game_col_b = None
     selected_games_b = []
 
-    # API 自动数据拉取
     api_url_b = "https://stats-crawler.up.railway.app/api/open/member-income"
     with st.spinner("正在向 API 请求盈亏排行数据，请稍候..."):
-        # 调用时传入 platform_b
-        raw_b = fetch_api_data(api_url_b, datestart_b, dateend_b, platform_b)
+        raw_b = fetch_api_data(api_url_b, datestart_b, dateend_b)
 
     if raw_b is not None and not raw_b.empty:
-        req_hash_b = hashlib.md5(f"{datestart_b}_{dateend_b}_{platform_b}".encode()).hexdigest()
+        req_hash_b = hashlib.md5(f"{datestart_b}_{dateend_b}".encode()).hexdigest()
         if st.session_state.get("last_req_b") != req_hash_b:
             st.session_state.read_set_b = set()
             st.session_state.last_req_b = req_hash_b
@@ -385,14 +374,12 @@ else: # 盈亏排行
         if sw1:
             st.markdown("<div class='range-label'>📊 销量区间 (在此区间内才跳异常)</div>", unsafe_allow_html=True)
             c1, c2 = st.columns(2); l_win_min = c1.number_input("销量(小)", value=30000, key="wmin"); l_win_max = c2.number_input("销量(大)", value=99999999, key="wmax")
-            st.markdown("<span class='sidebar-hint'>💡 预防销量虽高但金额无意义会员</span>", unsafe_allow_html=True)
         else: l_win_min, l_win_max = 30000, 99999999
         
         sw2 = st.checkbox("🔍 充销比(低)审计", value=True); l_ratio_l = st.number_input("充销比(低)设定值", value=2.0) if sw2 else 2.0
         if sw2:
             st.markdown("<div class='range-label'>💳 充值区间 (在此区间内才跳异常)</div>", unsafe_allow_html=True)
             c3, c4 = st.columns(2); l_fee_min = c3.number_input("充值(小)", value=1000, key="fmin"); l_fee_max = c4.number_input("充值(大)", value=2000, key="fmax")
-            st.markdown("<span class='sidebar-hint'>💡 预防充值过少或特定额度洗钱</span>", unsafe_allow_html=True)
         else: l_fee_min, l_fee_max = 1000, 2000
         
         sw3 = st.checkbox("🔍 待遇(返点+工资)审计", value=True); l_treat = st.number_input("待遇设定值", value=50000) if sw3 else 50000
@@ -401,53 +388,64 @@ else: # 盈亏排行
         audit_btn = st.button("🔥 执行组合审计", type="primary", use_container_width=True)
         config = {'sw1':sw1,'sw2':sw2,'sw3':sw3,'sw4':sw4,'sw5':sw5,'ratio_high':l_ratio_h,'win_min':l_win_min,'win_max':l_win_max,'ratio_low':l_ratio_l,'fee_min':l_fee_min,'fee_max':l_fee_max,'limit_treatment':l_treat,'no_fee_limit':l_no_fee,'profit_limit':l_profit}
 
-    if raw_b is not None and not raw_b.empty:
-        # ================== 執行：日期時間雙重篩選 ==================
-        if datestart_b.strip() and dateend_b.strip():
-            dt_start_b = pd.to_datetime(datestart_b, errors='coerce')
-            dt_end_b = pd.to_datetime(dateend_b, errors='coerce')
-            
-            if pd.notna(dt_start_b) and pd.notna(dt_end_b):
-                time_cols_b = [c for c in raw_b.columns if any(k in str(c).lower() for k in ['时间', '日期', 'date', 'time', '下注时间', '派彩时间', '创建时间'])]
-                if time_cols_b:
-                    t_col_b = time_cols_b[0]
-                    raw_b[t_col_b] = pd.to_datetime(raw_b[t_col_b], errors='coerce')
-                    raw_b = raw_b[(raw_b[t_col_b] >= dt_start_b) & (raw_b[t_col_b] <= dt_end_b)]
-                    st.caption(f"🕒 已套用雙重時間篩選：{dt_start_b.date()} 至 {dt_end_b.date()} (识别栏位: {t_col_b})")
-        # =======================================================
+    # 真正的事件绑定：必須點擊按鈕後才觸發顯示，避免沒反應
+    if audit_btn: st.session_state.trigger_b = True
 
-        if selected_games_b and game_col_b:
-            raw_b = raw_b[raw_b[game_col_b].isin(selected_games_b)]
-            st.caption(f"📍 当前已筛选彩种: {', '.join(selected_games_b)}")
-
-        st.session_state.res_data_b = run_strict_audit(raw_b, config)
-        
-        res = st.session_state.res_data_b
-        if res is not None:
-            st.markdown(f"<div class='metric-card-b'><div style='font-size:14px;color:#64748b'>符合选定区间异常人数</div><div class='metric-value'>{len(res)}</div></div>", unsafe_allow_html=True)
-            if not res.empty:
-                sc1, sc2, sc3 = st.columns([1, 2, 2])
-                sort_col = sc2.selectbox("排序字段", ["销量", "充值", "充销比", "待遇", "盈亏"], index=4, key="sort_b")
-                sort_dir = sc3.selectbox("排序方向", ["由大到小", "由小到大"], index=0, key="dir_b")
-                res = res.sort_values(by=sort_col, ascending=(sort_dir == "由小到大"))
+    if st.session_state.get('trigger_b', False) and raw_b is not None:
+        if raw_b.empty:
+            st.warning("⚠️ 查无 API 初始数据。")
+        else:
+            # ================== 執行：日期時間雙重篩選 ==================
+            if datestart_b.strip() and dateend_b.strip():
+                dt_start_b = pd.to_datetime(datestart_b, errors='coerce')
+                dt_end_b = pd.to_datetime(dateend_b, errors='coerce')
                 
-                st.markdown("""<div class='table-header'><div style='flex:0.6'>确认</div><div style='flex:1.5'>用户名</div><div style='flex:1.5'>彩种</div><div style='flex:2.5'>异常结论</div><div style='flex:1.0'>销量</div><div style='flex:1.0'>充值</div><div style='flex:1.0'>比值</div><div style='flex:1.0'>待遇</div><div style='flex:1.0'>盈亏</div></div>""", unsafe_allow_html=True)
-                with st.container(height=500):
-                    for i, row in res.iterrows():
-                        u = row['用户名']; is_read = u in st.session_state.get("read_set_b", set())
-                        cols = st.columns([0.6, 1.5, 1.5, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0])
-                        if cols[0].checkbox(" ", key=f"fb_{u}_{i}", value=is_read):
-                            if "read_set_b" not in st.session_state: st.session_state.read_set_b = set()
-                            st.session_state.read_set_b.add(u)
-                        else: st.session_state.read_set_b.discard(u)
-                        style = "color:#94a3b8; text-decoration:line-through;" if is_read else "color:#1e293b;"
+                if pd.notna(dt_start_b) and pd.notna(dt_end_b):
+                    # 【重要修正】結束時間補足至 23:59:59
+                    dt_end_b = dt_end_b.replace(hour=23, minute=59, second=59)
+                    time_cols_b = [c for c in raw_b.columns if any(k in str(c).lower() for k in ['时间', '日期', 'date', 'time', '下注时间', '派彩时间', '创建时间'])]
+                    if time_cols_b:
+                        t_col_b = time_cols_b[0]
+                        raw_b[t_col_b] = pd.to_datetime(raw_b[t_col_b], errors='coerce')
+                        raw_b = raw_b[(raw_b[t_col_b] >= dt_start_b) & (raw_b[t_col_b] <= dt_end_b)]
+            # =======================================================
+
+            if selected_games_b and game_col_b:
+                raw_b = raw_b[raw_b[game_col_b].isin(selected_games_b)]
+
+            if raw_b.empty:
+                st.warning("⚠️ 经过时间或彩种条件筛选后，查无符合的数据。请放宽筛选条件。")
+            else:
+                st.session_state.res_data_b = run_strict_audit(raw_b, config)
+                res = st.session_state.res_data_b
+                
+                if res is not None:
+                    st.markdown(f"<div class='metric-card-b'><div style='font-size:14px;color:#64748b'>符合选定区间异常人数</div><div class='metric-value'>{len(res)}</div></div>", unsafe_allow_html=True)
+                    if not res.empty:
+                        sc1, sc2, sc3 = st.columns([1, 2, 2])
+                        sort_col = sc2.selectbox("排序字段", ["销量", "充值", "充销比", "待遇", "盈亏"], index=4, key="sort_b")
+                        sort_dir = sc3.selectbox("排序方向", ["由大到小", "由小到大"], index=0, key="dir_b")
+                        res = res.sort_values(by=sort_col, ascending=(sort_dir == "由小到大"))
                         
-                        cols[1].markdown(f"<span style='{style}'>{u}</span>", unsafe_allow_html=True)
-                        cols[2].markdown(f"<span style='{style}'>{row.get('彩种', '-')}</span>", unsafe_allow_html=True)
-                        cols[3].markdown(f"<span class='badge-giant'>{row['原因']}</span>", unsafe_allow_html=True)
-                        cols[4].markdown(f"<span style='{style}'>{row['销量']:,.1f}</span>", unsafe_allow_html=True)
-                        cols[5].markdown(f"<span style='{style}'>{row['充值']:,.1f}</span>", unsafe_allow_html=True)
-                        cols[6].markdown(f"<span style='{style}'>{row['充销比']:.2f}</span>", unsafe_allow_html=True)
-                        cols[7].markdown(f"<span style='{style}'>{row['待遇']:,.1f}</span>", unsafe_allow_html=True)
-                        cols[8].markdown(f"<span style='{style}'>{row['盈亏']:,.1f}</span>", unsafe_allow_html=True)
-                        st.divider()
+                        st.markdown("""<div class='table-header'><div style='flex:0.6'>确认</div><div style='flex:1.5'>用户名</div><div style='flex:1.5'>彩种</div><div style='flex:2.5'>异常结论</div><div style='flex:1.0'>销量</div><div style='flex:1.0'>充值</div><div style='flex:1.0'>比值</div><div style='flex:1.0'>待遇</div><div style='flex:1.0'>盈亏</div></div>""", unsafe_allow_html=True)
+                        with st.container(height=500):
+                            for i, row in res.iterrows():
+                                u = row['用户名']; is_read = u in st.session_state.get("read_set_b", set())
+                                cols = st.columns([0.6, 1.5, 1.5, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0])
+                                if cols[0].checkbox(" ", key=f"fb_{u}_{i}", value=is_read):
+                                    if "read_set_b" not in st.session_state: st.session_state.read_set_b = set()
+                                    st.session_state.read_set_b.add(u)
+                                else: st.session_state.read_set_b.discard(u)
+                                style = "color:#94a3b8; text-decoration:line-through;" if is_read else "color:#1e293b;"
+                                
+                                cols[1].markdown(f"<span style='{style}'>{u}</span>", unsafe_allow_html=True)
+                                cols[2].markdown(f"<span style='{style}'>{row.get('彩种', '-')}</span>", unsafe_allow_html=True)
+                                cols[3].markdown(f"<span class='badge-giant'>{row['原因']}</span>", unsafe_allow_html=True)
+                                cols[4].markdown(f"<span style='{style}'>{row['销量']:,.1f}</span>", unsafe_allow_html=True)
+                                cols[5].markdown(f"<span style='{style}'>{row['充值']:,.1f}</span>", unsafe_allow_html=True)
+                                cols[6].markdown(f"<span style='{style}'>{row['充销比']:.2f}</span>", unsafe_allow_html=True)
+                                cols[7].markdown(f"<span style='{style}'>{row['待遇']:,.1f}</span>", unsafe_allow_html=True)
+                                cols[8].markdown(f"<span style='{style}'>{row['盈亏']:,.1f}</span>", unsafe_allow_html=True)
+                                st.divider()
+                    else:
+                        st.success("✅ 扫描完毕，未发现异常。")
