@@ -4,6 +4,12 @@ import hashlib
 import datetime
 import requests
 
+# ==========================================
+# ⚙️ 系統底層配置區 (解決 API 400 報錯)
+# 請在這裡填入您要查詢的「所有平台代碼」，以逗號分隔
+GLOBAL_PLATFORMS = "XO,XO2" 
+# ==========================================
+
 # 1. 页面配置
 st.set_page_config(page_title="抓鬼专家", layout="wide")
 
@@ -54,7 +60,7 @@ if not st.session_state.auth:
 # --- 核心数据获取模块 (API 串接) ---
 @st.cache_data(show_spinner=False, ttl=300)
 def fetch_api_data(endpoint, d_start, d_end):
-    """通用 API 数据获取函数，带缓存避免频繁请求 (已移除平台限制)"""
+    """通用 API 数据获取函数，带缓存避免频繁请求"""
     d_start = str(d_start).strip()
     d_end = str(d_end).strip()
     
@@ -64,9 +70,11 @@ def fetch_api_data(endpoint, d_start, d_end):
         "Content-Type": "application/json"
     }
     
+    # 【關鍵修復】將背景全域變數注入參數，滿足 API 強制校驗
     params = {
         "dateStart": d_start,
-        "dateEnd": d_end
+        "dateEnd": d_end,
+        "platform": GLOBAL_PLATFORMS 
     }
     
     try:
@@ -111,7 +119,6 @@ def run_audit_engine(df, rules):
         has_game = len(game_cols) > 0
 
         temp_df = pd.DataFrame()
-        # 加入 fallback 机制，避免因 API 栏位遗漏导致引擎当机崩溃
         temp_df['用户名'] = df[final_cols['user']].astype(str) if final_cols.get('user') else df.iloc[:,0].astype(str)
         temp_df['销量'] = pd.to_numeric(df[final_cols['vol']].astype(str).str.replace(',', ''), errors='coerce').fillna(0) if final_cols.get('vol') else 0
         temp_df['单数'] = pd.to_numeric(df[final_cols['cnt']].astype(str).str.replace(',', ''), errors='coerce').fillna(0) if final_cols.get('cnt') else 0
@@ -166,7 +173,6 @@ def run_strict_audit(df, cfg):
         clean_df['用户名'] = df['用户名'].astype(str) if '用户名' in df.columns else df.iloc[:,0].astype(str)
         target_cols = ['个人充值手续费', '个人派奖', '个人自身返点/返水', '个人系统分红']
         for col in target_cols: 
-            # 使用 .get 避免缺失字段时报错当机
             clean_df[col] = pd.to_numeric(df.get(col, 0), errors='coerce').fillna(0)
         clean_df['盈亏'] = pd.to_numeric(df[last_col], errors='coerce').fillna(0)
         
@@ -240,7 +246,7 @@ if mode == "用户彩票分析":
         raw = fetch_api_data(api_url_a, datestart_a, dateend_a)
 
     if raw is not None and not raw.empty:
-        req_hash = hashlib.md5(f"{datestart_a}_{dateend_a}".encode()).hexdigest()
+        req_hash = hashlib.md5(f"{datestart_a}_{dateend_a}_{GLOBAL_PLATFORMS}".encode()).hexdigest()
         if st.session_state.get("last_req_a") != req_hash:
             st.session_state.read_set_a = set()
             st.session_state.last_req_a = req_hash
@@ -262,27 +268,23 @@ if mode == "用户彩票分析":
         manual_btn = st.button("🔥 执行审计", type="primary", use_container_width=True)
         rules = {'use_manual':use_manual, 'v_on':v_on, 'v_min':v_min, 'v_max':v_max, 'c_on':c_on, 'c_limit':c_limit, 'p_on':p_on, 'p_min':p_min, 'p_max':p_max, 'r_on':r_on, 'r_min':r_min, 'r_max':r_max}
 
-    # 真正的事件绑定：必須點擊按鈕後才觸發顯示，避免沒反應
     if manual_btn: st.session_state.trigger_a = True
 
     if st.session_state.get('trigger_a', False) and raw is not None:
         if raw.empty:
             st.warning("⚠️ 查无 API 初始数据。")
         else:
-            # ================== 執行：日期時間雙重篩選 ==================
             if datestart_a.strip() and dateend_a.strip():
                 dt_start_a = pd.to_datetime(datestart_a, errors='coerce')
                 dt_end_a = pd.to_datetime(dateend_a, errors='coerce')
                 
                 if pd.notna(dt_start_a) and pd.notna(dt_end_a):
-                    # 【重要修正】結束時間補足至 23:59:59，避免漏算當天數據
                     dt_end_a = dt_end_a.replace(hour=23, minute=59, second=59)
                     time_cols = [c for c in raw.columns if any(k in str(c).lower() for k in ['时间', '日期', 'date', 'time', '下注时间', '派彩时间', '创建时间'])]
                     if time_cols:
                         t_col = time_cols[0]
                         raw[t_col] = pd.to_datetime(raw[t_col], errors='coerce')
                         raw = raw[(raw[t_col] >= dt_start_a) & (raw[t_col] <= dt_end_a)]
-            # =======================================================
 
             if selected_games and game_col:
                 raw = raw[raw[game_col].isin(selected_games)]
@@ -355,7 +357,7 @@ else: # 盈亏排行
         raw_b = fetch_api_data(api_url_b, datestart_b, dateend_b)
 
     if raw_b is not None and not raw_b.empty:
-        req_hash_b = hashlib.md5(f"{datestart_b}_{dateend_b}".encode()).hexdigest()
+        req_hash_b = hashlib.md5(f"{datestart_b}_{dateend_b}_{GLOBAL_PLATFORMS}".encode()).hexdigest()
         if st.session_state.get("last_req_b") != req_hash_b:
             st.session_state.read_set_b = set()
             st.session_state.last_req_b = req_hash_b
@@ -388,27 +390,23 @@ else: # 盈亏排行
         audit_btn = st.button("🔥 执行组合审计", type="primary", use_container_width=True)
         config = {'sw1':sw1,'sw2':sw2,'sw3':sw3,'sw4':sw4,'sw5':sw5,'ratio_high':l_ratio_h,'win_min':l_win_min,'win_max':l_win_max,'ratio_low':l_ratio_l,'fee_min':l_fee_min,'fee_max':l_fee_max,'limit_treatment':l_treat,'no_fee_limit':l_no_fee,'profit_limit':l_profit}
 
-    # 真正的事件绑定：必須點擊按鈕後才觸發顯示，避免沒反應
     if audit_btn: st.session_state.trigger_b = True
 
     if st.session_state.get('trigger_b', False) and raw_b is not None:
         if raw_b.empty:
             st.warning("⚠️ 查无 API 初始数据。")
         else:
-            # ================== 執行：日期時間雙重篩選 ==================
             if datestart_b.strip() and dateend_b.strip():
                 dt_start_b = pd.to_datetime(datestart_b, errors='coerce')
                 dt_end_b = pd.to_datetime(dateend_b, errors='coerce')
                 
                 if pd.notna(dt_start_b) and pd.notna(dt_end_b):
-                    # 【重要修正】結束時間補足至 23:59:59
                     dt_end_b = dt_end_b.replace(hour=23, minute=59, second=59)
                     time_cols_b = [c for c in raw_b.columns if any(k in str(c).lower() for k in ['时间', '日期', 'date', 'time', '下注时间', '派彩时间', '创建时间'])]
                     if time_cols_b:
                         t_col_b = time_cols_b[0]
                         raw_b[t_col_b] = pd.to_datetime(raw_b[t_col_b], errors='coerce')
                         raw_b = raw_b[(raw_b[t_col_b] >= dt_start_b) & (raw_b[t_col_b] <= dt_end_b)]
-            # =======================================================
 
             if selected_games_b and game_col_b:
                 raw_b = raw_b[raw_b[game_col_b].isin(selected_games_b)]
