@@ -5,15 +5,15 @@ import datetime
 import requests
 
 # ==========================================
-# ⚙️ 系統底層配置區 (解決 API 400 報錯)
-# 請在這裡填入您要查詢的「所有平台代碼」，以逗號分隔
-GLOBAL_PLATFORMS = "YD,XO,ND,JD,SY,MT,LY,FB,XY,XO,OL,LS,HS,JY,YS,SH,XH" 
+# ⚙️ 系統底層配置區 
+# 涵蓋所有平台代碼，解決 API 400 報錯
+GLOBAL_PLATFORMS = "YD,XO,ND,JD,SY,MT,LY,FB,XY,XO,OL,LS,HS,JY,YS,SH,XH"
 # ==========================================
 
 # 1. 页面配置
 st.set_page_config(page_title="抓鬼专家", layout="wide")
 
-# 2. 注入所有原始样式 (合并两份代码的 CSS)
+# 2. 注入所有原始样式
 st.markdown("""
     <style>
     .stApp { background-color: #f8fafc; }
@@ -22,13 +22,11 @@ st.markdown("""
     [data-testid="stSidebar"] p, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] .stToggle p { 
         color: #1e293b !important; font-weight: 700 !important; 
     }
-    /* 统计看板 A */
     .metric-card-a {
         background-color: #ffffff; padding: 15px; border-radius: 12px;
         box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-top: 5px solid #ef4444;
         text-align: center; margin-bottom: 10px;
     }
-    /* 统计看板 B */
     .metric-card-b {
         background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); 
         border-bottom: 4px solid #ef4444; text-align: center;
@@ -60,7 +58,7 @@ if not st.session_state.auth:
 # --- 核心数据获取模块 (API 串接) ---
 @st.cache_data(show_spinner=False, ttl=300)
 def fetch_api_data(endpoint, d_start, d_end):
-    """通用 API 数据获取函数，带缓存避免频繁请求"""
+    """通用 API 数据获取函数，带缓存避免频繁请求 (包含诊断输出)"""
     d_start = str(d_start).strip()
     d_end = str(d_end).strip()
     
@@ -70,7 +68,6 @@ def fetch_api_data(endpoint, d_start, d_end):
         "Content-Type": "application/json"
     }
     
-    # 【關鍵修復】將背景全域變數注入參數，滿足 API 強制校驗
     params = {
         "dateStart": d_start,
         "dateEnd": d_end,
@@ -81,6 +78,10 @@ def fetch_api_data(endpoint, d_start, d_end):
         response = requests.get(endpoint, params=params, headers=headers, timeout=30)
         response.raise_for_status() 
         data = response.json()
+        
+        # 🟢 【严谨验证：将 API 原始回传结果印在前端供审计】
+        with st.expander("🛠️ 展开查看 API 原始回传数据 (Debug)", expanded=False):
+            st.json(data)
         
         if isinstance(data, dict):
             if "data" in data:
@@ -100,9 +101,10 @@ def fetch_api_data(endpoint, d_start, d_end):
         st.error(f"❌ 网络或解析异常: {e}")
         return None
 
-# --- 时间动态预设值计算 ---
+# --- 时间动态预设值计算 (扩大日期范围测试) ---
 now = datetime.datetime.now()
-default_start = now.strftime("%Y-%m-%d")
+# 預設查詢過去 30 天的資料，確保數據不會因為當天空白而顯示無資料
+default_start = (now - datetime.timedelta(days=30)).strftime("%Y-%m-%d")
 default_end = (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
 
 # --- 核心引擎 A ---
