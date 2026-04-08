@@ -111,21 +111,40 @@ default_end = (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
 def run_audit_engine(df, rules):
     try:
         df.columns = [str(c).strip() for c in df.columns]
-        mapping = {'user':['用户名','账号','会员'],'vol':['销量','投注'],'cnt':['单数','次数'],'profit':['盈亏','盈利'],'bonus':['奖金','派奖','中奖']}
+        # 擴充映射詞庫，增加容錯率
+        mapping = {
+            'user': ['用户名', '账号', '会员', '玩家', 'user', 'account'],
+            'vol': ['销量', '投注', '下注', '流水'],
+            'cnt': ['单数', '次数', '笔数'],
+            'profit': ['盈亏', '盈利', '派彩', '输赢'],
+            'bonus': ['奖金', '派奖', '中奖', '返奖']
+        }
         final_cols = {}
         for k, aliases in mapping.items():
             for col in df.columns:
-                if any(a in col for a in aliases): final_cols[k] = col; break
+                if any(a.lower() in col.lower() for a in aliases): 
+                    final_cols[k] = col; break
                 
-        game_cols = [c for c in df.columns if c in ['彩种', '游戏', '彩种名称', 'Game']]
+        game_cols = [c for c in df.columns if any(g in c.lower() for g in ['彩种', '游戏', 'game', '玩法'])]
         has_game = len(game_cols) > 0
 
         temp_df = pd.DataFrame()
-        temp_df['用户名'] = df[final_cols['user']].astype(str) if final_cols.get('user') else df.iloc[:,0].astype(str)
-        temp_df['销量'] = pd.to_numeric(df[final_cols['vol']].astype(str).str.replace(',', ''), errors='coerce').fillna(0) if final_cols.get('vol') else 0
-        temp_df['单数'] = pd.to_numeric(df[final_cols['cnt']].astype(str).str.replace(',', ''), errors='coerce').fillna(0) if final_cols.get('cnt') else 0
-        temp_df['盈亏'] = pd.to_numeric(df[final_cols['profit']].astype(str).str.replace(',', ''), errors='coerce').fillna(0) if final_cols.get('profit') else 0
-        temp_df['奖金'] = pd.to_numeric(df[final_cols['bonus']].astype(str).str.replace(',', ''), errors='coerce').fillna(0) if final_cols.get('bonus') else 0
+        
+        # 🟢 【嚴謹修正 1】：安全提取用戶名，避免抓取到彩種
+        if 'user' in final_cols:
+            user_col = final_cols['user']
+        else:
+            # 排除已被判定為彩種的欄位後，取第一個剩餘欄位當作備用
+            remaining_cols = [c for c in df.columns if c not in game_cols]
+            user_col = remaining_cols[0] if remaining_cols else df.columns[0]
+            
+        temp_df['用户名'] = df[user_col].astype(str)
+        
+        # 🟢 加入 regex=True 規範化千分位符號的清除，避免正則警告
+        temp_df['销量'] = pd.to_numeric(df[final_cols['vol']].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0) if 'vol' in final_cols else 0.0
+        temp_df['单数'] = pd.to_numeric(df[final_cols['cnt']].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0) if 'cnt' in final_cols else 0.0
+        temp_df['盈亏'] = pd.to_numeric(df[final_cols['profit']].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0) if 'profit' in final_cols else 0.0
+        temp_df['奖金'] = pd.to_numeric(df[final_cols['bonus']].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0) if 'bonus' in final_cols else 0.0
         
         if has_game:
             temp_df['彩种'] = df[game_cols[0]].astype(str)
@@ -159,7 +178,8 @@ def run_audit_engine(df, rules):
         grouped['原因'] = grouped.apply(apply_logic, axis=1)
         return grouped[grouped['原因'].notna()].copy()
     except Exception as e: 
-        st.error(f"引擎 A 解析异常: {e}")
+        import traceback
+        st.error(f"引擎 A 解析异常: {e}\n{traceback.format_exc()}")
         return None
 
 # --- 核心引擎 B ---
@@ -168,15 +188,34 @@ def run_strict_audit(df, cfg):
         df.columns = [str(c).strip() for c in df.columns]
         last_col = df.columns[-1]
         
-        game_cols = [c for c in df.columns if c in ['彩种', '游戏', '彩种名称', 'Game']]
+        game_cols = [c for c in df.columns if any(g in c.lower() for g in ['彩种', '游戏', 'game', '玩法'])]
         has_game = len(game_cols) > 0
 
         clean_df = pd.DataFrame()
-        clean_df['用户名'] = df['用户名'].astype(str) if '用户名' in df.columns else df.iloc[:,0].astype(str)
+        
+        # 🟢 【嚴謹修正 1】：同步引擎 A 邏輯，避免用戶名錯抓為彩種
+        possible_users = [c for c in df.columns if any(a in c.lower() for a in ['用户名', '账号', '会员', '玩家', 'user', 'account'])]
+        if possible_users:
+            user_col = possible_users[0]
+        else:
+            remaining_cols = [c for c in df.columns if c not in game_cols]
+            user_col = remaining_cols[0] if remaining_cols else df.columns[0]
+            
+        clean_df['用户名'] = df[user_col].astype(str)
+        
         target_cols = ['个人充值手续费', '个人派奖', '个人自身返点/返水', '个人系统分红']
+        
+        # 🟢 【嚴謹修正 2】：解決 int object has no attribute fillna 報錯
         for col in target_cols: 
-            clean_df[col] = pd.to_numeric(df.get(col, 0), errors='coerce').fillna(0)
-        clean_df['盈亏'] = pd.to_numeric(df[last_col], errors='coerce').fillna(0)
+            if col in df.columns:
+                # 確保是針對 Pandas Series 進行操作
+                clean_df[col] = pd.to_numeric(df[col].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
+            else:
+                # 欄位缺失時，直接賦予標量 0.0，避免調用不存在的屬性
+                clean_df[col] = 0.0
+                
+        # 最後一欄(盈虧)也加上千分位清理以防資料污染
+        clean_df['盈亏'] = pd.to_numeric(df[last_col].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
         
         if has_game:
             clean_df['彩种'] = df[game_cols[0]].astype(str)
@@ -210,7 +249,8 @@ def run_strict_audit(df, cfg):
         grouped['充销比'] = grouped.apply(lambda x: x['销量']/x['充值'] if x['充值']>0 else 0, axis=1)
         return grouped[grouped['原因'].notna()].copy()
     except Exception as e: 
-        st.error(f"引擎 B 解析异常: {e}")
+        import traceback
+        st.error(f"引擎 B 解析异常: {e}\n{traceback.format_exc()}")
         return None
 
 # 4. 侧边栏导航
@@ -253,7 +293,7 @@ if mode == "用户彩票分析":
             st.session_state.read_set_a = set()
             st.session_state.last_req_a = req_hash
             
-        game_cols = [c for c in raw.columns if c in ['彩种', '游戏', '彩种名称', 'Game']]
+        game_cols = [c for c in raw.columns if any(g in c.lower() for g in ['彩种', '游戏', 'game', '玩法'])]
         if game_cols:
             game_col = game_cols[0]
             all_games = sorted(raw[game_col].astype(str).dropna().unique().tolist())
@@ -364,7 +404,7 @@ else: # 盈亏排行
             st.session_state.read_set_b = set()
             st.session_state.last_req_b = req_hash_b
             
-        game_cols_b = [c for c in raw_b.columns if c in ['彩种', '游戏', '彩种名称', 'Game']]
+        game_cols_b = [c for c in raw_b.columns if any(g in c.lower() for g in ['彩种', '游戏', 'game', '玩法'])]
         if game_cols_b:
             game_col_b = game_cols_b[0]
             all_games_b = sorted(raw_b[game_col_b].astype(str).dropna().unique().tolist())
