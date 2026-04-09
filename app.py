@@ -93,11 +93,11 @@ def get_mapped_col(df, exact_matches, partial_matches, exclude_keywords=None, fo
 
 # --- 嚴格定義 (明確界定 User 與 Game，確保優先抓取正確的中英文鍵值) ---
 USER_EXACT = [
-    'userName', 'username', 'memberAccount', 'userAccount', 'account', 'loginName', 'memberName', 
-    '会员账号', '會員帳號', '会员名', '會員名', '用户名', '用戶名', '账号', '帳號', 'player', 'name',
-    'userId', 'user_id', 'uid', 'playerId', 'player_id'
+    'account', 'username', 'userName', 'memberAccount', 'userAccount', 
+    'loginName', 'memberName', '会员账号', '會員帳號', '会员名', '會員名', 
+    '用户名', '用戶名', '账号', '帐号', '帳號', 'player', 'name'
 ]
-USER_PARTIAL = ['account', 'user', '玩家', '会员', '會員', 'login']
+USER_PARTIAL = ['account', 'user', '玩家', '会员', '會員', 'login', '帐号', '账号']
 
 GAME_EXACT = [
     'lotteryName', 'lottery_name', 'gameName', 'game_name', '彩种名称', '彩種名稱', 
@@ -112,7 +112,8 @@ USER_EXCLUDE = [
     'bet', 'amount', 'profit', 'win', 'loss', 'payout', 'bonus', 
     'fee', 'vol', '单', '單', '奖', '獎', '盈', '亏', '銷', '销', '量', '额', '額',
     'rate', 'rtp', 'currency', 'device', 'platform', 'version',
-    'orderid', 'recordid', 'logid', 'transid', 'history', 'bill', 'sn', '流水号', '订单号'
+    'orderid', 'recordid', 'logid', 'transid', 'history', 'bill', 'sn', '流水号', '订单号',
+    'merchant', '商户'  # 排除商戶名稱，避免抓到 HS, ND 等
 ]
 
 # --- 🎯 嚴謹模式：真實數值探測器 (Data-Sniffing for Game Name) ---
@@ -148,7 +149,7 @@ def find_game_column(df, forbidden_cols=None):
 # --- 🎯 嚴謹模式：真實數值探測器 (Data-Sniffing for Username) ---
 def find_user_column(df, forbidden_cols=None):
     """
-    精確微調版：加入互斥鎖與統計學判定，徹底解決彩種誤認為帳號的問題。
+    精確微調版：移除 UID 等短 ID 匹配，高度聚焦於英數混合的真實帳號 (如 tao168)。
     """
     if forbidden_cols is None: forbidden_cols = []
     
@@ -158,8 +159,8 @@ def find_user_column(df, forbidden_cols=None):
         if '.' in v_str:
             try: float(v_str); return True
             except ValueError: pass
-        # 非常短的純數字通常是內部 index，排除掉
-        if v_str.isdigit() and len(v_str) <= 3:
+        # 嚴格封殺：非常短的純數字通常是內部 index 或商戶 ID (如 134, 444, 4)
+        if v_str.isdigit() and len(v_str) <= 4:
             return True
         return False
 
@@ -172,12 +173,12 @@ def find_user_column(df, forbidden_cols=None):
         
         # 排除黑名單與絕對不要的純 index 表頭
         if any(k in c_str for k in USER_EXCLUDE): continue
-        if c_str in ['id', 'no', 'sn', 'index']: continue
+        if c_str in ['id', 'no', 'sn', 'index', 'uid', 'userid', 'playerid']: continue
         
         sample_data = df[c].dropna().astype(str).head(20).tolist()
         if not sample_data: continue
         
-        # 🚨 統計學防線：如果這個欄位有高達 40% 以上都包含彩種關鍵字，那絕對是彩種欄位 (允許少數玩家取名有'彩'字)
+        # 🚨 統計學防線：如果這個欄位有高達 40% 以上都包含彩種關鍵字，那絕對是彩種欄位
         game_kw_count = sum(1 for val in sample_data if any(gk in val for gk in ['彩', '分分', '选', '哈希', '波场', '以太坊', '赛车', '龙虎', '体育', '电子', '百家乐']))
         if game_kw_count >= len(sample_data) * 0.4:
             continue
@@ -191,19 +192,20 @@ def find_user_column(df, forbidden_cols=None):
             
             if is_strictly_invalid(val):
                 invalid_count += 1
-                score -= 50
+                score -= 100 # 嚴厲懲罰純數字短ID
             else:
+                # 高度獎勵真正的玩家帳號特徵 (英數混合，如 tao168, lfz888888)
                 if re.match(r'^[a-zA-Z0-9_]{4,25}$', val) and re.search(r'[a-zA-Z]', val):
-                    score += 50
+                    score += 100 
                 elif re.match(r'^[a-zA-Z_]{4,25}$', val):
-                    score += 30
-                elif val.isdigit() and len(val) >= 4:
+                    score += 50
+                elif val.isdigit() and len(val) >= 5:
                     score += 10
                     
         if invalid_count == len([v for v in sample_data if v.strip()]):
             continue
             
-        # 表頭最高加權 (精準打擊)
+        # 表頭最高加權 (精準打擊 "帐号", "account")
         if c_str in [x.lower() for x in USER_EXACT]:
             score += 1000  # 直接保送
         elif any(p.lower() in c_str for p in USER_PARTIAL):
@@ -230,7 +232,7 @@ def find_user_column(df, forbidden_cols=None):
         if c in forbidden_cols: continue
         c_str_lower = str(c).lower()
         if any(k in c_str_lower for k in USER_EXCLUDE): continue
-        if c_str_lower in ['id', 'no', 'sn']: continue
+        if c_str_lower in ['id', 'no', 'sn', 'uid', 'userid']: continue
         sample = df[c].dropna().astype(str).head(10).tolist()
         game_kw_cnt = sum(1 for v in sample if any(gk in v for gk in ['彩', '分分', '哈希']))
         if game_kw_cnt >= len(sample) * 0.4: continue
