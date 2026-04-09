@@ -3,6 +3,7 @@ import pandas as pd
 import hashlib
 import datetime
 import requests
+import re  # 引入正則表達式，用於嚴謹的數據特徵探測
 
 # ==========================================
 # ⚙️ 系統底層配置區 
@@ -55,46 +56,52 @@ if not st.session_state.auth:
             else: st.error("❌ 密碼錯誤")
     st.stop()
 
-# --- 通用欄位名稱匹配函數 (權重優先級優化版) ---
-def get_mapped_col(df, exact_matches, partial_matches, exclude_keywords=None):
-    """優先以我們定義的關鍵字列表順序進行精確匹配，確保高優先級欄位(如帳號字串)被先選中，避免誤抓ID。"""
-    if exclude_keywords is None:
-        exclude_keywords = []
+# --- 通用欄位名稱匹配函數 (隔離機制) ---
+def get_mapped_col(df, exact_matches, partial_matches, exclude_keywords=None, forbidden_cols=None):
+    if exclude_keywords is None: exclude_keywords = []
+    if forbidden_cols is None: forbidden_cols = []
         
-    # 準備 df 的欄位以便比對
     cols_lower = [str(c).lower().strip() for c in df.columns]
     cols_clean = [str(c).lower().replace('_', '').replace(' ', '') for c in df.columns]
 
-    # 1. 完全精確匹配 (依照 exact_matches 的優先級，而非 df.columns 的順序)
+    # 1. 完全精確匹配
     for exact_val in exact_matches:
         exact_lower = exact_val.lower()
         if exact_lower in cols_lower:
-            return df.columns[cols_lower.index(exact_lower)]
+            orig_col = df.columns[cols_lower.index(exact_lower)]
+            if orig_col not in forbidden_cols: 
+                return orig_col
             
     # 2. 去除底線與空格的精確匹配
     for exact_val in exact_matches:
         exact_clean = exact_val.lower().replace('_', '').replace(' ', '')
         if exact_clean in cols_clean:
-            return df.columns[cols_clean.index(exact_clean)]
+            orig_col = df.columns[cols_clean.index(exact_clean)]
+            if orig_col not in forbidden_cols: 
+                return orig_col
                 
-    # 3. 模糊匹配 (嚴格排除干擾字，依照 partial_matches 的優先級)
+    # 3. 模糊匹配
     for p in partial_matches:
         p_lower = p.lower()
         for i, c_str in enumerate(cols_lower):
-            if any(ext.lower() in c_str for ext in exclude_keywords):
-                continue
+            orig_col = df.columns[i]
+            if orig_col in forbidden_cols: continue
+            if any(ext.lower() in c_str for ext in exclude_keywords): continue
             if p_lower in c_str:
-                return df.columns[i]
+                return orig_col
     return None
 
-# 定義高度共用的用戶名匹配規則 (將明確的帳號字串排在最前面，ID排在後面作降級備用)
+# --- 嚴格定義 (重新梳理：明確界定 User 與 Game，絕不重疊) ---
 USER_EXACT = [
-    'memberAccount', 'userAccount', 'userName', 'username', 'memberName', 'account', 'loginName', 'name', 'uname', 'player',
+    'username', 'userName', 'memberAccount', 'userAccount', 'account', 'loginName', 'memberName', 'name', 'player',
     '会员账号', '會員帳號', '会员名', '會員名', '用户名', '用戶名', '账号', '帳號', 
     'userid', 'user_id', 'memberid', 'member_id', 'uid', 'accountid', 'account_id'
 ]
-USER_PARTIAL = ['account', 'user', '玩家', '会员', '會員', 'member', 'name', 'login']
-# 關鍵修正：移除了直接排除 'id'，改為精準排除不相干的資料與 metrics 欄位
+USER_PARTIAL = ['account', 'user', '玩家', '会员', '會員', 'member', 'login']
+
+GAME_EXACT = ['lotteryName', 'gameName', 'platform', '彩种', '彩種', '平台', 'lottery', 'game']
+GAME_PARTIAL = ['lottery', 'game', '游戏', '遊戲', '玩法', '彩']
+
 USER_EXCLUDE = [
     'time', 'date', 'level', 'agent', 'parent', 'type', 'status', 'ip', 
     'remark', 'game', 'lottery', 'play', 'group', 'code', '时间', '時間', 
@@ -105,10 +112,39 @@ USER_EXCLUDE = [
     'order', 'record', 'log', 'trans', 'history', 'bill', 'no', 'num', 'sn'
 ]
 
+# --- 🎯 嚴謹模式：真實數值探測器 (Data-Sniffing) ---
+def find_user_column(df, forbidden_cols=None):
+    """
+    此函數不僅依靠欄位名稱，當名稱失效時，會直接讀取 API 數據前 3 筆，
+    探測是否符合會員特徵 (例: a026026 / A1278A)。
+    """
+    if forbidden_cols is None: forbidden_cols = []
+    
+    # 步驟一：常規名稱匹配
+    col = get_mapped_col(df, USER_EXACT, USER_PARTIAL, exclude_keywords=USER_EXCLUDE, forbidden_cols=forbidden_cols)
+    if col: return col
+    
+    # 步驟二：嚴謹模式 - 探測真實數據內容 (針對如 a026026 的英數字混合)
+    for c in df.columns:
+        if c in forbidden_cols: continue
+        if any(k in str(c).lower() for k in USER_EXCLUDE): continue
+        
+        sample_data = df[c].dropna().astype(str).head(3).tolist()
+        if not sample_data: continue
+        
+        # 判斷條件：全部樣本均為 4~20 碼英數字組合，且至少包含一個英文字母 (避免抓到純數字流水號)
+        if all(re.match(r'^[a-zA-Z0-9_]{4,20}$', val) for val in sample_data):
+            if any(re.search(r'[a-zA-Z]', val) for val in sample_data): 
+                return c # 極高信心確定為帳號
+                
+    # 步驟三：最終降級策略
+    safe_cols = [c for c in df.columns if c not in forbidden_cols and not any(k in str(c).lower() for k in USER_EXCLUDE)]
+    return safe_cols[0] if safe_cols else df.columns[0]
+
+
 # --- 核心數據獲取模組 (API 串接) ---
 @st.cache_data(show_spinner=False, ttl=300)
 def fetch_api_data(endpoint, d_start, d_end):
-    """通用 API 數據獲取函數，帶快取避免頻繁請求"""
     d_start = str(d_start).strip()
     d_end = str(d_end).strip()
     
@@ -117,12 +153,7 @@ def fetch_api_data(endpoint, d_start, d_end):
         "x-api-key": "sk-d79a713caf53e8bdh3154a596ca1a0166234df7",
         "Content-Type": "application/json"
     }
-    
-    params = {
-        "dateStart": d_start,
-        "dateEnd": d_end,
-        "platform": GLOBAL_PLATFORMS 
-    }
+    params = { "dateStart": d_start, "dateEnd": d_end, "platform": GLOBAL_PLATFORMS }
     
     try:
         response = requests.get(endpoint, params=params, headers=headers, timeout=30)
@@ -137,24 +168,17 @@ def fetch_api_data(endpoint, d_start, d_end):
                 if not data["records"]: return pd.DataFrame()
                 df = pd.DataFrame(data["records"])
             else:
-                st.warning("⚠️ 接口回傳成功，但響應中未包含有效的會員數據。")
                 return pd.DataFrame()
         elif isinstance(data, list):
             if not data: return pd.DataFrame()
             df = pd.DataFrame(data)
         else:
-            st.warning("⚠️ 接口回傳格式異常，無法解析。")
             return pd.DataFrame()
-            
         return df
-    except requests.exceptions.HTTPError as e:
-        st.error(f"❌ 接口響應錯誤 (HTTP {e.response.status_code}): {e.response.text}")
-        return None
     except Exception as e:
-        st.error(f"❌ 網路或解析異常: {e}")
+        st.error(f"❌ 數據獲取異常: {e}")
         return None
 
-# --- 時間動態預設值計算 ---
 now = datetime.datetime.now()
 default_start = now.strftime("%Y-%m-%d 03:00:00")
 default_end = (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d 03:00:00")
@@ -164,33 +188,41 @@ def run_audit_engine(df, rules, cols_map=None):
     try:
         df.columns = [str(c).strip() for c in df.columns]
         
-        # 允許由外部介面 (cols_map) 強制覆寫自動判斷的欄位
         if cols_map:
             user_col = cols_map.get('u')
+            game_col = cols_map.get('g')
             vol_col = cols_map.get('v')
             cnt_col = cols_map.get('c')
             profit_col = cols_map.get('p')
             bonus_col = cols_map.get('b')
-            game_col = cols_map.get('g')
         else:
-            user_col = get_mapped_col(df, USER_EXACT, USER_PARTIAL, exclude_keywords=USER_EXCLUDE)
-            vol_col = get_mapped_col(df, ['betAmount', 'validBetAmount', '销量', '銷量', '总销量', '總銷量'], ['bet', '投注', '下注', '流水', 'vol', '销', '銷'])
-            cnt_col = get_mapped_col(df, ['betCount', '单数', '單數', '总单数', '總單數'], ['count', '次数', '次數', '笔数', '筆數', 'cnt', '单', '單'])
-            profit_col = get_mapped_col(df, ['netAmount', 'winAmount', '盈亏', '盈虧', '总盈亏', '總盈虧'], ['profit', '盈利', '派彩', '输赢', '輸贏'])
-            bonus_col = get_mapped_col(df, ['payOut', '奖金', '獎金', '总奖金', '總獎金'], ['bonus', '派奖', '派獎', '中奖', '中獎', '返奖', '返獎'])
-            game_col = get_mapped_col(df, ['lotteryName', 'platform', '彩种', '彩種', '平台', 'gameName'], ['lottery', 'game', '游戏', '遊戲', '玩法', '彩'])
+            # 【嚴謹模式：順序至關重要】 先抓 User -> 加入隔離 -> 再抓 Game
+            forbidden = []
+            
+            user_col = find_user_column(df, forbidden_cols=forbidden)
+            if user_col: forbidden.append(user_col)
+            
+            game_col = get_mapped_col(df, GAME_EXACT, GAME_PARTIAL, forbidden_cols=forbidden)
+            if game_col: forbidden.append(game_col)
+            
+            vol_col = get_mapped_col(df, ['betAmount', 'validBetAmount', '销量', '銷量', '总销量', '總銷量'], ['bet', '投注', '下注', '流水', 'vol', '销', '銷'], forbidden_cols=forbidden)
+            if vol_col: forbidden.append(vol_col)
+                
+            cnt_col = get_mapped_col(df, ['betCount', '单数', '單數', '总单数', '總單數'], ['count', '次数', '次數', '笔数', '筆數', 'cnt', '单', '單'], forbidden_cols=forbidden)
+            if cnt_col: forbidden.append(cnt_col)
+                
+            profit_col = get_mapped_col(df, ['netAmount', 'winAmount', '盈亏', '盈虧', '总盈亏', '總盈虧'], ['profit', '盈利', '派彩', '输赢', '輸贏'], forbidden_cols=forbidden)
+            if profit_col: forbidden.append(profit_col)
+                
+            bonus_col = get_mapped_col(df, ['payOut', '奖金', '獎金', '总奖金', '總獎金'], ['bonus', '派奖', '派獎', '中奖', '中獎', '返奖', '返獎'], forbidden_cols=forbidden)
 
         temp_df = pd.DataFrame()
         
-        # 安全降級 fallback：排除所有常見非用戶欄位
         if user_col and user_col in df.columns:
             temp_df['用戶名'] = df[user_col].astype(str)
         else:
-            safe_cols = []
-            for c in df.columns:
-                c_str = str(c).lower()
-                if c != game_col and not any(k in c_str for k in USER_EXCLUDE):
-                    safe_cols.append(c)
+            # 最底層安全回退
+            safe_cols = [c for c in df.columns if c != game_col and not any(k in str(c).lower() for k in USER_EXCLUDE)]
             temp_df['用戶名'] = df[safe_cols[0]].astype(str) if safe_cols else df.columns[0]
             
         def to_num(c_name):
@@ -215,7 +247,6 @@ def run_audit_engine(df, rules, cols_map=None):
         
         def apply_logic(row):
             v, c, p, r = row['銷量'], row['單數'], row['盈虧'], row['RTP']
-            
             if rules.get('use_manual', False):
                 match = True
                 if rules['v_on'] and not (rules['v_min'] <= v <= rules['v_max']): match = False
@@ -229,14 +260,12 @@ def run_audit_engine(df, rules, cols_map=None):
             if v > 2000 and c <= 10: m.append("疑似對刷")
             if v >= 500000 and 0.995 <= r <= 1.000: m.append("疑似刷量")
             if p >= 100000: m.append("盈利大會員")
-            
             return " | ".join(m) if m else None
             
         grouped['原因'] = grouped.apply(apply_logic, axis=1)
         return grouped[grouped['原因'].notna()].copy()
     except Exception as e: 
-        import traceback
-        st.error(f"引擎 A 解析異常: {e}\n{traceback.format_exc()}")
+        st.error(f"引擎 A 解析異常: {e}")
         return None
 
 # --- 核心引擎 B (盈虧排行) ---
@@ -245,44 +274,48 @@ def run_strict_audit(df, cfg):
         df.columns = [str(c).strip() for c in df.columns]
         last_col = df.columns[-1]
         
-        user_col = get_mapped_col(df, USER_EXACT, USER_PARTIAL, exclude_keywords=USER_EXCLUDE)
-        game_col = get_mapped_col(df, ['lotteryName', 'platform', '彩种', '彩種', '平台', 'gameName'], ['lottery', 'game', '游戏', '遊戲', '玩法', '彩'])
+        # 【嚴謹模式：順序至關重要】 先抓 User -> 加入隔離 -> 再抓其他
+        forbidden = []
+        user_col = find_user_column(df, forbidden_cols=forbidden)
+        if user_col: forbidden.append(user_col)
+        
+        game_col = get_mapped_col(df, GAME_EXACT, GAME_PARTIAL, forbidden_cols=forbidden)
+        if game_col: forbidden.append(game_col)
+        
+        def get_col_val(keywords_exact, keywords_partial):
+            col = get_mapped_col(df, keywords_exact, keywords_partial, forbidden_cols=forbidden)
+            if col: 
+                forbidden.append(col)
+                return col, pd.to_numeric(df[col].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
+            return None, pd.Series([0.0]*len(df), index=df.index)
+
+        col_fee_name, fee_s = get_col_val(['个人充值手续费', '個人充值手續費', '充值手续费', '充值手續費', '充值', 'depositAmount', 'deposit'], ['充值', 'deposit'])
+        col_win_name, win_s = get_col_val(['个人派奖', '個人派獎', '派奖', '派獎', '总派奖', '總派獎', '销量', '銷量', 'betAmount', 'validBetAmount'], ['派奖', '派獎', 'payOut', '销量', '銷量', 'bet'])
+        col_fs_name, fs_s = get_col_val(['个人自身返点/返水', '個人自身返點/返水', '个人自身返点', '個人自身返點', '个人返水', '個人返水', '返点', '返點', '返水'], ['返点', '返點', '返水', 'rebate'])
+        col_fh_name, fh_s = get_col_val(['个人系统分红', '個人系統分紅', '系统分红', '系統分紅', '分红', '分紅'], ['分红', '分紅', 'dividend'])
+        
+        profit_col = get_mapped_col(df, ['netAmount', 'winAmount', '盈亏', '盈虧', '总盈亏', '總盈虧'], ['profit', '盈利', '派彩'], forbidden_cols=forbidden)
+        if profit_col: forbidden.append(profit_col)
 
         clean_df = pd.DataFrame()
-        
         if user_col:
             clean_df['用戶名'] = df[user_col].astype(str)
         else:
-            safe_cols = []
-            for c in df.columns:
-                c_str = str(c).lower()
-                if c != game_col and not any(k in c_str for k in USER_EXCLUDE):
-                    safe_cols.append(c)
+            safe_cols = [c for c in df.columns if c not in forbidden and not any(k in str(c).lower() for k in USER_EXCLUDE)]
             clean_df['用戶名'] = df[safe_cols[0]].astype(str) if safe_cols else df.columns[0]
             
-        def get_col_val(keywords_exact, keywords_partial):
-            col = get_mapped_col(df, keywords_exact, keywords_partial)
-            if col:
-                return pd.to_numeric(df[col].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
-            return pd.Series([0.0]*len(df), index=df.index)
-
-        clean_df['個人充值手續費'] = get_col_val(['个人充值手续费', '個人充值手續費', '充值手续费', '充值手續費', '充值', 'depositAmount', 'deposit'], ['充值', 'deposit'])
-        clean_df['個人派獎'] = get_col_val(['个人派奖', '個人派獎', '派奖', '派獎', '总派奖', '總派獎', '销量', '銷量', 'betAmount', 'validBetAmount'], ['派奖', '派獎', 'payOut', '销量', '銷量', 'bet'])
-        clean_df['個人自身返點/返水'] = get_col_val(['个人自身返点/返水', '個人自身返點/返水', '个人自身返点', '個人自身返點', '个人返水', '個人返水', '返点', '返點', '返水'], ['返点', '返點', '返水', 'rebate'])
-        clean_df['個人系統分紅'] = get_col_val(['个人系统分红', '個人系統分紅', '系统分红', '系統分紅', '分红', '分紅'], ['分红', '分紅', 'dividend'])
+        clean_df['個人充值手續費'] = fee_s
+        clean_df['個人派獎'] = win_s
+        clean_df['個人自身返點/返水'] = fs_s
+        clean_df['個人系統分紅'] = fh_s
         
-        profit_col = get_mapped_col(df, ['netAmount', 'winAmount', '盈亏', '盈虧', '总盈亏', '總盈虧'], ['profit', '盈利', '派彩'])
-        if profit_col:
-            clean_df['盈虧'] = pd.to_numeric(df[profit_col].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
-        else:
-            clean_df['盈虧'] = pd.to_numeric(df[last_col].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
+        if profit_col: clean_df['盈虧'] = pd.to_numeric(df[profit_col].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
+        else: clean_df['盈虧'] = pd.to_numeric(df[last_col].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
         
-        if game_col:
-            clean_df['彩種'] = df[game_col].astype(str)
+        if game_col: clean_df['彩種'] = df[game_col].astype(str)
 
         agg_dict = {'個人充值手續費':'sum','個人派獎':'sum','個人自身返點/返水':'sum','個人系統分紅':'sum','盈虧':'sum'}
-        if game_col:
-            agg_dict['彩種'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
+        if game_col: agg_dict['彩種'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
 
         grouped = clean_df.groupby('用戶名').agg(agg_dict).reset_index()
         
@@ -290,17 +323,13 @@ def run_strict_audit(df, cfg):
             tags = []
             fee, win, fs, fh, p = row['個人充值手續費'], row['個人派獎'], row['個人自身返點/返水'], row['個人系統分紅'], row['盈虧']
             treatment = fs + fh
-            
             if cfg['sw1'] and fee > 0:
-                ratio = win / fee
-                if ratio > cfg['ratio_high'] and cfg['win_min'] <= win <= cfg['win_max']: tags.append("充銷比過高")
+                if (win / fee) > cfg['ratio_high'] and cfg['win_min'] <= win <= cfg['win_max']: tags.append("充銷比過高")
             if cfg['sw2'] and fee > 0:
-                ratio = win / fee
-                if ratio < cfg['ratio_low'] and cfg['fee_min'] <= fee <= cfg['fee_max']: tags.append("充銷比偏低")
+                if (win / fee) < cfg['ratio_low'] and cfg['fee_min'] <= fee <= cfg['fee_max']: tags.append("充銷比偏低")
             if cfg['sw3'] and treatment > cfg['limit_treatment']: tags.append("待遇過高")
             if cfg['sw4'] and fee == 0 and win > cfg['no_fee_limit']: tags.append("無充下注異常")
             if cfg['sw5'] and p >= cfg['profit_limit']: tags.append("盈利過大")
-            
             return " | ".join(tags) if tags else None
             
         grouped['原因'] = grouped.apply(apply_rules, axis=1)
@@ -309,8 +338,7 @@ def run_strict_audit(df, cfg):
         grouped['充銷比'] = grouped.apply(lambda x: x['銷量']/x['充值'] if x['充值']>0 else 0, axis=1)
         return grouped[grouped['原因'].notna()].copy()
     except Exception as e: 
-        import traceback
-        st.error(f"引擎 B 解析異常: {e}\n{traceback.format_exc()}")
+        st.error(f"引擎 B 解析異常: {e}")
         return None
 
 # 4. 側邊欄導航
@@ -327,15 +355,11 @@ if mode == "用戶彩票分析":
         st.markdown("### ⚙️ 審計控制中心")
         use_manual = st.toggle("🚀 手動自訂模式", value=False)
         st.write("---")
-
         st.markdown("### 📅 日期時間篩選")
         col_st, col_et = st.columns(2)
         datestart_a = col_st.text_input("開始時間", value=default_start, key="ds_a")
         dateend_a = col_et.text_input("結束時間", value=default_end, key="de_a")
-        
-        if st.button("🔄 重新拉取 API 數據", use_container_width=True):
-            st.cache_data.clear()
-            
+        if st.button("🔄 重新拉取 API 數據", use_container_width=True): st.cache_data.clear()
         st.write("---")
 
     raw = None
@@ -356,17 +380,27 @@ if mode == "用戶彩票分析":
             
         all_cols = raw.columns.tolist()
         
-        # 自動預測欄位 (這裡會因為新版權重函數而精準抓住字串帳號)
-        auto_u = get_mapped_col(raw, USER_EXACT, USER_PARTIAL, exclude_keywords=USER_EXCLUDE)
-        auto_v = get_mapped_col(raw, ['betAmount', 'validBetAmount', '销量', '銷量', '总销量', '總銷量'], ['bet', '投注', '下注', '流水', 'vol', '销', '銷'])
-        auto_c = get_mapped_col(raw, ['betCount', '单数', '單數', '总单数', '總單數'], ['count', '次数', '次數', '笔数', '筆數', 'cnt', '单', '單'])
-        auto_p = get_mapped_col(raw, ['netAmount', 'winAmount', '盈亏', '盈虧', '总盈亏', '總盈虧'], ['profit', '盈利', '派彩', '输赢', '輸贏'])
-        auto_b = get_mapped_col(raw, ['payOut', '奖金', '獎金', '总奖金', '總獎金'], ['bonus', '派奖', '派獎', '中奖', '中獎', '返奖', '返獎'])
-        auto_g = get_mapped_col(raw, ['lotteryName', 'platform', '彩种', '彩種', '平台', 'gameName'], ['lottery', 'game', '游戏', '遊戲', '玩法', '彩'])
+        # 【嚴謹模式 Sidebar UI預測】先抓帳號 -> 隔離 -> 抓彩種 -> 隔離 -> 抓指標
+        forbidden_ui = []
+        auto_u = find_user_column(raw, forbidden_cols=forbidden_ui)
+        if auto_u: forbidden_ui.append(auto_u)
+        
+        auto_g = get_mapped_col(raw, GAME_EXACT, GAME_PARTIAL, forbidden_cols=forbidden_ui)
+        if auto_g: forbidden_ui.append(auto_g)
+        
+        auto_v = get_mapped_col(raw, ['betAmount', 'validBetAmount', '销量', '銷量', '总销量', '總銷量'], ['bet', '投注', '下注', '流水', 'vol', '销', '銷'], forbidden_cols=forbidden_ui)
+        if auto_v: forbidden_ui.append(auto_v)
+            
+        auto_c = get_mapped_col(raw, ['betCount', '单数', '單數', '总单数', '總單數'], ['count', '次数', '次數', '笔数', '筆數', 'cnt', '单', '單'], forbidden_cols=forbidden_ui)
+        if auto_c: forbidden_ui.append(auto_c)
+            
+        auto_p = get_mapped_col(raw, ['netAmount', 'winAmount', '盈亏', '盈虧', '总盈亏', '總盈虧'], ['profit', '盈利', '派彩', '输赢', '輸贏'], forbidden_cols=forbidden_ui)
+        if auto_p: forbidden_ui.append(auto_p)
+            
+        auto_b = get_mapped_col(raw, ['payOut', '奖金', '獎金', '总奖金', '總獎金'], ['bonus', '派奖', '派獎', '中奖', '中獎', '返奖', '返獎'], forbidden_cols=forbidden_ui)
 
-        # 🚀 強力救援介面：允許使用者手動覆寫自動預測
         with st.sidebar.expander("🛠️ API 欄位校正 (若抓取錯誤請展開)", expanded=False):
-            st.markdown("<div class='sidebar-hint'>系統會自動偵測對應欄位，若抓取錯誤（例如顯示數字而非用戶名），請在此手動指定：</div>", unsafe_allow_html=True)
+            st.markdown("<div class='sidebar-hint'>系統已啟動雙重驗證隔離機制，若仍有異常可手動指定：</div>", unsafe_allow_html=True)
             def get_idx(val): return all_cols.index(val) if val in all_cols else 0
             
             sel_u = st.selectbox("👤 選擇【用戶名】欄位", all_cols, index=get_idx(auto_u))
@@ -399,17 +433,13 @@ if mode == "用戶彩票分析":
     if manual_btn: st.session_state.trigger_a = True
 
     if st.session_state.get('trigger_a', False) and raw is not None:
-        if raw.empty:
-            st.warning("⚠️ 查無 API 初始數據。")
+        if raw.empty: st.warning("⚠️ 查無 API 初始數據。")
         else:
             if datestart_a.strip() and dateend_a.strip():
                 dt_start_a = pd.to_datetime(datestart_a, errors='coerce')
                 dt_end_a = pd.to_datetime(dateend_a, errors='coerce')
-                
                 if pd.notna(dt_start_a) and pd.notna(dt_end_a):
-                    if len(dateend_a.strip()) <= 10:
-                        dt_end_a = dt_end_a.replace(hour=23, minute=59, second=59)
-                        
+                    if len(dateend_a.strip()) <= 10: dt_end_a = dt_end_a.replace(hour=23, minute=59, second=59)
                     time_cols = [c for c in raw.columns if any(k in str(c).lower() for k in ['时间', '時間', '日期', 'date', 'time', '下注', '派彩', '创建', '創建'])]
                     if time_cols:
                         t_col = time_cols[0]
@@ -419,12 +449,10 @@ if mode == "用戶彩票分析":
             if selected_games and game_col and game_col in raw.columns:
                 raw = raw[raw[game_col].isin(selected_games)]
                 
-            if raw.empty:
-                st.warning("⚠️ 經過時間或彩種條件篩選後，查無符合的數據。請放寬篩選條件。")
+            if raw.empty: st.warning("⚠️ 經過時間或彩種條件篩選後，查無符合的數據。請放寬篩選條件。")
             else:
                 st.session_state.res_data_a = run_audit_engine(raw, rules, cols_map_a)
                 res = st.session_state.get("res_data_a")
-                
                 if res is not None and not res.empty:
                     st.markdown("### 🚨 異常捕獲實況")
                     k1, k2, k3, k4, k5 = st.columns(5)
@@ -459,10 +487,9 @@ if mode == "用戶彩票分析":
                             cols[7].markdown(f"<span style='{style}'>{row['RTP']:.3f}</span>", unsafe_allow_html=True)
                             st.divider()
                     st.download_button("📥 導出結果", res.to_csv(index=False).encode('utf-8-sig'), "audit_a.csv")
-                elif res is not None: 
-                    st.success("✅ 掃描完畢，當前篩選條件下未發現任何符合的異常帳號。")
+                elif res is not None: st.success("✅ 掃描完畢，當前篩選條件下未發現任何符合的異常帳號。")
 
-else: # 盈虧排行
+else:
     st.markdown("<div class='title-banner'><h1>📈 盈虧排行審計 (API數據源)</h1></div>", unsafe_allow_html=True)
     
     with st.sidebar:
@@ -471,10 +498,7 @@ else: # 盈虧排行
         col_st, col_et = st.columns(2)
         datestart_b = col_st.text_input("開始時間", value=default_start, key="ds_b")
         dateend_b = col_et.text_input("結束時間", value=default_end, key="de_b")
-        
-        if st.button("🔄 重新拉取 API 數據", key="refresh_b", use_container_width=True):
-            st.cache_data.clear()
-            
+        if st.button("🔄 重新拉取 API 數據", key="refresh_b", use_container_width=True): st.cache_data.clear()
         st.write("---")
 
     raw_b = None
@@ -492,9 +516,13 @@ else: # 盈虧排行
             st.session_state.read_set_b = set()
             st.session_state.last_req_b = req_hash_b
             
-        game_col_b = get_mapped_col(raw_b, ['lotteryName', 'platform', '彩种', '彩種', '平台', 'gameName'], ['lottery', 'game', '游戏', '遊戲', '玩法', '彩'])
-        if game_col_b:
-            all_games_b = sorted(raw_b[game_col_b].astype(str).dropna().unique().tolist())
+        forbidden_ui_b = []
+        user_col_b = find_user_column(raw_b, forbidden_cols=forbidden_ui_b)
+        if user_col_b: forbidden_ui_b.append(user_col_b)
+        
+        game_col_b = get_mapped_col(raw_b, GAME_EXACT, GAME_PARTIAL, forbidden_cols=forbidden_ui_b)
+        
+        if game_col_b: all_games_b = sorted(raw_b[game_col_b].astype(str).dropna().unique().tolist())
 
     with st.sidebar:
         st.markdown("### 🎯 彩種篩選 (可複選)")
@@ -522,32 +550,25 @@ else: # 盈虧排行
     if audit_btn: st.session_state.trigger_b = True
 
     if st.session_state.get('trigger_b', False) and raw_b is not None:
-        if raw_b.empty:
-            st.warning("⚠️ 查無 API 初始數據。")
+        if raw_b.empty: st.warning("⚠️ 查無 API 初始數據。")
         else:
             if datestart_b.strip() and dateend_b.strip():
                 dt_start_b = pd.to_datetime(datestart_b, errors='coerce')
                 dt_end_b = pd.to_datetime(dateend_b, errors='coerce')
-                
                 if pd.notna(dt_start_b) and pd.notna(dt_end_b):
-                    if len(dateend_b.strip()) <= 10:
-                        dt_end_b = dt_end_b.replace(hour=23, minute=59, second=59)
-                        
+                    if len(dateend_b.strip()) <= 10: dt_end_b = dt_end_b.replace(hour=23, minute=59, second=59)
                     time_cols_b = [c for c in raw_b.columns if any(k in str(c).lower() for k in ['时间', '時間', '日期', 'date', 'time', '下注', '派彩', '创建', '創建'])]
                     if time_cols_b:
                         t_col_b = time_cols_b[0]
                         raw_b[t_col_b] = pd.to_datetime(raw_b[t_col_b], errors='coerce')
                         raw_b = raw_b[(raw_b[t_col_b] >= dt_start_b) & (raw_b[t_col_b] <= dt_end_b)]
 
-            if selected_games_b and game_col_b:
-                raw_b = raw_b[raw_b[game_col_b].isin(selected_games_b)]
+            if selected_games_b and game_col_b: raw_b = raw_b[raw_b[game_col_b].isin(selected_games_b)]
 
-            if raw_b.empty:
-                st.warning("⚠️ 經過時間或彩種條件篩選後，查無符合的數據。請放寬篩選條件。")
+            if raw_b.empty: st.warning("⚠️ 經過時間或彩種條件篩選後，查無符合的數據。請放寬篩選條件。")
             else:
                 st.session_state.res_data_b = run_strict_audit(raw_b, config)
                 res = st.session_state.res_data_b
-                
                 if res is not None:
                     st.markdown(f"<div class='metric-card-b'><div style='font-size:14px;color:#64748b'>符合選定區間異常人數</div><div class='metric-value'>{len(res)}</div></div>", unsafe_allow_html=True)
                     if not res.empty:
@@ -576,5 +597,4 @@ else: # 盈虧排行
                                 cols[7].markdown(f"<span style='{style}'>{row['待遇']:,.1f}</span>", unsafe_allow_html=True)
                                 cols[8].markdown(f"<span style='{style}'>{row['盈虧']:,.1f}</span>", unsafe_allow_html=True)
                                 st.divider()
-                    else:
-                        st.success("✅ 掃描完畢，未發現異常。")
+                    else: st.success("✅ 掃描完畢，未發現異常。")
