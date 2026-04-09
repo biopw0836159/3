@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import hashlib
 import datetime
 import requests
 import re
@@ -11,9 +10,9 @@ import re
 GLOBAL_PLATFORMS = "YD,XO,ND,JD,SY,MT,LY,FB,XY,XO,OL,LS,HS,JY,YS,SH,XH"
 
 # 1. 頁面配置
-st.set_page_config(page_title="抓鬼專家", layout="wide")
+st.set_page_config(page_title="抓鬼專家 (嚴謹模式)", layout="wide")
 
-# 2. 注入樣式 (保持您喜愛的原始風格)
+# 2. 注入樣式
 st.markdown("""
     <style>
     .stApp { background-color: #f8fafc; }
@@ -53,37 +52,66 @@ if not st.session_state.auth:
             else: st.error("❌ 密碼錯誤")
     st.stop()
 
-# --- 🎯 精準欄位識別邏輯 (核心抓取修正) ---
-def find_column_by_score(df, targets, exclude_list=None):
-    if exclude_list is None: exclude_list = []
-    best_col = None
-    max_score = -9999
+# --- 🎯 嚴謹欄位識別邏輯 (防呆防錯) ---
+def find_best_column(df, category, exclude_cols=None):
+    if exclude_cols is None: exclude_cols = []
     
-    for col in df.columns:
-        if col in exclude_list: continue
-        col_lower = str(col).lower().replace('_', '').replace(' ', '')
-        score = 0
-        
-        # 標題關鍵字匹配權重
-        for t in targets:
-            if t.lower() == col_lower: score += 1000 # 完全匹配
-            elif t.lower() in col_lower: score += 500 # 部分包含
+    # 嚴謹的關鍵字對應表 (按優先級)
+    keywords_map = {
+        'user': ['userName', 'memberAccount', 'account', '用戶名', '帳號', '玩家'],
+        'game': ['lotteryName', 'gameName', '彩種', '遊戲', 'game', '玩法'],
+        'volume': ['validBetAmount', 'betAmount', '銷量', '投注金額', '打碼量', '有效投注'],
+        'count': ['betCount', '單數', '筆數', '注數', '下注數'],
+        'profit': ['netAmount', '盈虧', '盈利', '派彩', 'profit', '客贏'],
+        'bonus': ['payOut', '獎金', '派彩', '中獎金額', 'winAmount'],
+        'deposit': ['depositAmount', '充值', '存款', '入款', '充值金額'],
+        'fee': ['feeAmount', '充值手續費', '手續費'],
+        'rebate': ['rebate', '返點', '返水', '退水', '活動'],
+        'dividend': ['dividend', '分紅', '紅利', '派息']
+    }
+    
+    targets = keywords_map.get(category, [])
+    
+    # 第一階段：完全精確匹配 (忽略大小寫)
+    for t in targets:
+        for col in df.columns:
+            if col in exclude_cols: continue
+            if str(col).lower() == t.lower(): return col
             
-        # 數據特徵偵測 (針對帳號)
-        if 'user' in targets or 'account' in targets:
-            sample = df[col].dropna().head(10).astype(str).tolist()
-            if sample:
-                # 排除明顯是純編號且標題叫 ID 的
-                if col_lower in ['id', 'uid', 'userid']: score -= 2000
-                # 如果內容包含字母，很可能是帳號
-                if any(re.search(r'[a-zA-Z]', s) for s in sample): score += 300
-                # 如果內容長度 >= 6，可能是手機號或帳號
-                if any(len(s) >= 6 for s in sample): score += 100
-        
-        if score > max_score:
-            max_score = score
-            best_col = col
-    return best_col
+    # 第二階段：包含關鍵字 (防呆)
+    for t in targets:
+        for col in df.columns:
+            if col in exclude_cols: continue
+            col_str = str(col).lower()
+            if t.lower() in col_str:
+                # 嚴格防止 user 抓到 game, id 或時間欄位
+                if category == 'user' and any(k in col_str for k in ['game', 'lottery', 'id', 'time', 'date']): continue
+                # 防止 game 抓到 user 欄位
+                if category == 'game' and any(k in col_str for k in ['user', 'account', 'member']): continue
+                return col
+                
+    return None
+
+# --- 強制清洗無效用戶名 (核心排除純數字/彩種名) ---
+def is_valid_user(username):
+    u = str(username).strip()
+    # 排除空值或系統預設詞
+    if not u or u.lower() in ['nan', 'none', 'null', '總計', '合计', 'total', '0']: return False
+    
+    # 排除純數字且長度過短 (很可能是 ID 而非帳號)
+    if u.isdigit() and len(u) <= 5: return False 
+    
+    # 排除包含彩種關鍵字的字串
+    game_keywords = ['彩', '飛艇', '賽車', '百家樂', '龍虎', '輪盤', '快3', '快三', '11選5', 'pk10', '六合', '特碼', '真人', '體育', '電競', '分分', '秒秒', '遊戲']
+    if any(k in u for k in game_keywords): return False
+    
+    return True
+
+# --- 數據強健轉換 (正則提煉純數字) ---
+def to_n(df, col_name):
+    if not col_name or col_name not in df.columns: return 0
+    # 利用正則 [^\d\.\-] 替換掉所有非數字、小數點和負號的字符，確保不會因為逗號($/¥)轉換失敗
+    return pd.to_numeric(df[col_name].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce').fillna(0)
 
 # --- 核心數據獲取模組 (API) ---
 @st.cache_data(show_spinner=False, ttl=300)
@@ -109,29 +137,28 @@ def fetch_api_data(endpoint, d_start, d_end):
 # --- 核心引擎 A (用戶彩票分析) ---
 def run_audit_engine(df, rules):
     try:
-        # 自動識別欄位 (基於權重，不輕易排除)
-        user_col = find_column_by_score(df, ['userName', 'memberAccount', '帳號', '用戶名', 'account'])
-        game_col = find_column_by_score(df, ['lotteryName', 'gameName', '彩種'], exclude_list=[user_col])
-        vol_col = find_column_by_score(df, ['betAmount', 'validBetAmount', '銷量', '投注金額'])
-        cnt_col = find_column_by_score(df, ['betCount', '單數', '筆數'])
-        profit_col = find_column_by_score(df, ['netAmount', '盈虧', '盈利'])
-        bonus_col = find_column_by_score(df, ['payOut', '獎金', '派彩'])
+        user_col = find_best_column(df, 'user')
+        if not user_col: return None, "無法於資料源中辨識到合法的『用戶名』欄位"
+        
+        game_col = find_best_column(df, 'game', [user_col])
+        vol_col = find_best_column(df, 'volume', [user_col, game_col])
+        cnt_col = find_best_column(df, 'count', [user_col, game_col, vol_col])
+        profit_col = find_best_column(df, 'profit', [user_col, game_col, vol_col, cnt_col])
+        bonus_col = find_best_column(df, 'bonus', [user_col, game_col, vol_col, cnt_col, profit_col])
 
         temp = pd.DataFrame()
         temp['用戶名'] = df[user_col].astype(str).str.strip()
-        
-        def to_n(c): return pd.to_numeric(df[c].astype(str).str.replace(',', ''), errors='coerce').fillna(0) if c else 0
-        
-        temp['銷量'] = to_n(vol_col)
-        temp['單數'] = to_n(cnt_col)
-        temp['盈虧'] = to_n(profit_col)
-        temp['獎金'] = to_n(bonus_col)
-        if game_col: temp['彩種'] = df[game_col].astype(str).str.strip()
+        temp['銷量'] = to_n(df, vol_col)
+        temp['單數'] = to_n(df, cnt_col)
+        temp['盈虧'] = to_n(df, profit_col)
+        temp['獎金'] = to_n(df, bonus_col)
+
+        # ✨ 關鍵攔截：清洗過濾掉純短數字和彩種名
+        temp = temp[temp['用戶名'].apply(is_valid_user)]
+        if temp.empty: return None, "過濾後無有效數據 (可能原資料無合法用戶名)"
 
         # 聚合計算
         agg_dict = {'銷量':'sum', '單數':'sum', '盈虧':'sum', '獎金':'sum'}
-        if game_col: agg_dict['彩種'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i) not in ['nan','None','']]))))
-        
         grouped = temp.groupby('用戶名').agg(agg_dict).reset_index()
         grouped['RTP'] = grouped.apply(lambda x: x['獎金'] / x['銷量'] if x['銷量'] > 0 else 0, axis=1)
         
@@ -153,29 +180,37 @@ def run_audit_engine(df, rules):
             return " | ".join(res_tags) if res_tags else None
 
         grouped['原因'] = grouped.apply(check, axis=1)
-        return grouped[grouped['原因'].notna()].copy()
+        
+        debug_info = {
+            "用戶欄位映射": user_col, "遊戲欄位映射": game_col, "銷量欄位映射": vol_col,
+            "單數欄位映射": cnt_col, "盈虧欄位映射": profit_col, "獎金欄位映射": bonus_col
+        }
+        return grouped[grouped['原因'].notna()].copy(), debug_info
     except Exception as e:
-        st.error(f"引擎 A 解析異常: {e}")
-        return None
+        return None, f"引擎 A 解析異常: {e}"
 
 # --- 核心引擎 B (盈虧排行) ---
 def run_strict_audit(df, cfg):
     try:
-        user_col = find_column_by_score(df, ['userName', 'memberAccount', '帳號', '用戶名'])
-        fee_col = find_column_by_score(df, ['depositAmount', '充值手續費', '充值'])
-        win_col = find_column_by_score(df, ['betAmount', '銷量', '投注金額']) # 以銷量為準
-        fs_col = find_column_by_score(df, ['rebate', '返點', '返水'])
-        fh_col = find_column_by_score(df, ['dividend', '分紅'])
-        p_col = find_column_by_score(df, ['netAmount', '盈虧'])
-
-        def to_n(c): return pd.to_numeric(df[c].astype(str).str.replace(',', ''), errors='coerce').fillna(0) if c else 0
+        user_col = find_best_column(df, 'user')
+        if not user_col: return None, "無法於資料源中辨識到合法的『用戶名』欄位"
         
+        fee_col = find_best_column(df, 'deposit', [user_col])
+        win_col = find_best_column(df, 'volume', [user_col, fee_col])
+        fs_col = find_best_column(df, 'rebate', [user_col, fee_col, win_col])
+        fh_col = find_best_column(df, 'dividend', [user_col, fee_col, win_col, fs_col])
+        p_col = find_best_column(df, 'profit', [user_col, fee_col, win_col, fs_col, fh_col])
+
         clean = pd.DataFrame()
         clean['用戶名'] = df[user_col].astype(str).str.strip()
-        clean['充值'] = to_n(fee_col)
-        clean['銷量'] = to_n(win_col)
-        clean['待遇'] = to_n(fs_col) + to_n(fh_col)
-        clean['盈虧'] = to_n(p_col)
+        clean['充值'] = to_n(df, fee_col)
+        clean['銷量'] = to_n(df, win_col)
+        clean['待遇'] = to_n(df, fs_col) + to_n(df, fh_col)
+        clean['盈虧'] = to_n(df, p_col)
+        
+        # ✨ 關鍵攔截：清洗過濾掉純短數字和彩種名
+        clean = clean[clean['用戶名'].apply(is_valid_user)]
+        if clean.empty: return None, "過濾後無有效數據 (可能原資料無合法用戶名)"
         
         grouped = clean.groupby('用戶名').agg({'充值':'sum', '銷量':'sum', '待遇':'sum', '盈虧':'sum'}).reset_index()
         grouped['充銷比'] = grouped.apply(lambda x: x['銷量']/x['充值'] if x['充值']>0 else 0, axis=1)
@@ -191,10 +226,14 @@ def run_strict_audit(df, cfg):
             return " | ".join(t) if t else None
             
         grouped['原因'] = grouped.apply(check_b, axis=1)
-        return grouped[grouped['原因'].notna()].copy()
+        
+        debug_info = {
+            "用戶欄位映射": user_col, "充值欄位映射": fee_col, "銷量欄位映射": win_col,
+            "返點欄位映射": fs_col, "分紅欄位映射": fh_col, "盈虧欄位映射": p_col
+        }
+        return grouped[grouped['原因'].notna()].copy(), debug_info
     except Exception as e:
-        st.error(f"引擎 B 解析異常: {e}")
-        return None
+        return None, f"引擎 B 解析異常: {e}"
 
 # --- UI 導航 ---
 now = datetime.datetime.now()
@@ -222,22 +261,31 @@ if mode == "用戶彩票分析":
         exec_a = st.button("🔥 執行審計", type="primary", use_container_width=True)
 
     raw_a = fetch_api_data("https://stats-crawler.up.railway.app/api/open/lottery-analysis", ds, de)
-    if exec_a and raw_a is not None:
+    if exec_a and raw_a is not None and not raw_a.empty:
         rules = {'use_manual':use_manual, 'v_on':v_on, 'v_min':v_min, 'v_max':v_max, 'c_on':c_on, 'c_limit':c_limit, 'p_on':p_on, 'p_min':p_min, 'p_max':p_max, 'r_on':r_on, 'r_min':r_min, 'r_max':r_max}
-        res = run_audit_engine(raw_a, rules)
-        if res is not None and not res.empty:
-            st.markdown("### 🚨 異常捕獲實況")
-            st.markdown("""<div class='table-header'><div style='flex:1.5'>用戶名</div><div style='flex:2.5'>異常原因</div><div style='flex:1.2'>銷量</div><div style='flex:1.0'>單數</div><div style='flex:1.2'>盈虧</div><div style='flex:1.0'>RTP</div></div>""", unsafe_allow_html=True)
-            for _, row in res.iterrows():
-                cols = st.columns([1.5, 2.5, 1.2, 1.0, 1.2, 1.0])
-                cols[0].write(row['用戶名'])
-                cols[1].markdown(f"<span class='badge-red'>{row['原因']}</span>", unsafe_allow_html=True)
-                cols[2].write(f"{row['銷量']:,.0f}")
-                cols[3].write(int(row['單數']))
-                cols[4].write(f"{row['盈虧']:,.0f}")
-                cols[5].write(f"{row['RTP']:.3f}")
-                st.divider()
-        else: st.success("✅ 掃描完畢，未發現異常。")
+        res, info = run_audit_engine(raw_a, rules)
+        
+        if res is not None:
+            with st.expander("🛠️ 程式驗證與欄位映射 (嚴謹模式)", expanded=False):
+                st.json(info)
+                
+            if not res.empty:
+                st.markdown("### 🚨 異常捕獲實況")
+                st.markdown("""<div class='table-header'><div style='flex:1.5'>用戶名</div><div style='flex:2.5'>異常原因</div><div style='flex:1.2'>銷量</div><div style='flex:1.0'>單數</div><div style='flex:1.2'>盈虧</div><div style='flex:1.0'>RTP</div></div>""", unsafe_allow_html=True)
+                for _, row in res.iterrows():
+                    cols = st.columns([1.5, 2.5, 1.2, 1.0, 1.2, 1.0])
+                    cols[0].write(row['用戶名'])
+                    cols[1].markdown(f"<span class='badge-red'>{row['原因']}</span>", unsafe_allow_html=True)
+                    cols[2].write(f"{row['銷量']:,.0f}")
+                    cols[3].write(int(row['單數']))
+                    cols[4].write(f"{row['盈虧']:,.0f}")
+                    cols[5].write(f"{row['RTP']:.3f}")
+                    st.divider()
+            else: st.success("✅ 掃描完畢，真實有效用戶中未發現異常。")
+        else:
+            st.error(f"❌ 解析失敗: {info}")
+    elif exec_a:
+        st.warning("⚠️ 未獲取到數據，請確認時間區間或 API 狀態。")
 
 else:
     st.markdown("<div class='title-banner'><h1>📈 盈虧排行審計</h1></div>", unsafe_allow_html=True)
@@ -253,17 +301,26 @@ else:
         exec_b = st.button("🔥 執行組合審計", type="primary", use_container_width=True)
 
     raw_b = fetch_api_data("https://stats-crawler.up.railway.app/api/open/member-income", ds_b, de_b)
-    if exec_b and raw_b is not None:
+    if exec_b and raw_b is not None and not raw_b.empty:
         cfg = {'sw1':sw1,'sw2':sw2,'sw3':sw3,'sw4':sw4,'sw5':sw5,'ratio_high':r_h,'ratio_low':r_l,'win_min':30000,'fee_min':1000,'limit_treatment':l_t,'no_fee_limit':l_n,'profit_limit':l_p}
-        res_b = run_strict_audit(raw_b, cfg)
-        if res_b is not None and not res_b.empty:
-            st.markdown(f"<div class='metric-card-b'><div class='metric-value'>{len(res_b)}</div><div class='metric-label'>符合異常人數</div></div>", unsafe_allow_html=True)
-            st.markdown("""<div class='table-header'><div style='flex:1.5'>用戶名</div><div style='flex:2.5'>異常結論</div><div style='flex:1.0'>銷量</div><div style='flex:1.0'>充值</div><div style='flex:1.0'>比值</div><div style='flex:1.0'>待遇</div><div style='flex:1.0'>盈虧</div></div>""", unsafe_allow_html=True)
-            for _, row in res_b.iterrows():
-                c = st.columns([1.5, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0])
-                c[0].write(row['用戶名'])
-                c[1].markdown(f"<span class='badge-giant'>{row['原因']}</span>", unsafe_allow_html=True)
-                c[2].write(f"{row['銷量']:,.0f}"); c[3].write(f"{row['充值']:,.0f}"); c[4].write(f"{row['充銷比']:.1f}")
-                c[5].write(f"{row['待遇']:,.0f}"); c[6].write(f"{row['盈虧']:,.0f}")
-                st.divider()
-        else: st.success("✅ 掃描完畢，未發現異常。")
+        res_b, info_b = run_strict_audit(raw_b, cfg)
+        
+        if res_b is not None:
+            with st.expander("🛠️ 程式驗證與欄位映射 (嚴謹模式)", expanded=False):
+                st.json(info_b)
+                
+            if not res_b.empty:
+                st.markdown(f"<div class='metric-card-b'><div class='metric-value'>{len(res_b)}</div><div class='metric-label'>符合異常人數</div></div>", unsafe_allow_html=True)
+                st.markdown("""<div class='table-header'><div style='flex:1.5'>用戶名</div><div style='flex:2.5'>異常結論</div><div style='flex:1.0'>銷量</div><div style='flex:1.0'>充值</div><div style='flex:1.0'>比值</div><div style='flex:1.0'>待遇</div><div style='flex:1.0'>盈虧</div></div>""", unsafe_allow_html=True)
+                for _, row in res_b.iterrows():
+                    c = st.columns([1.5, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0])
+                    c[0].write(row['用戶名'])
+                    c[1].markdown(f"<span class='badge-giant'>{row['原因']}</span>", unsafe_allow_html=True)
+                    c[2].write(f"{row['銷量']:,.0f}"); c[3].write(f"{row['充值']:,.0f}"); c[4].write(f"{row['充銷比']:.1f}")
+                    c[5].write(f"{row['待遇']:,.0f}"); c[6].write(f"{row['盈虧']:,.0f}")
+                    st.divider()
+            else: st.success("✅ 掃描完畢，真實有效用戶中未發現異常。")
+        else:
+            st.error(f"❌ 解析失敗: {info_b}")
+    elif exec_b:
+        st.warning("⚠️ 未獲取到數據，請確認時間區間或 API 狀態。")
