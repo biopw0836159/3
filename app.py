@@ -84,10 +84,11 @@ def get_mapped_col(df, exact_matches, partial_matches, exclude_keywords=None, fo
     return None
 
 # --- 🎯 終極權重排序 (按照最精確到最模糊排列) ---
+# 徹底移除了 uid, userid, userId, playerId 這些內部 ID，避免抓錯
 USER_EXACT = [
     '帐号', '帳號', '用户名', '用戶名', '会员账号', '會員帳號', '会员名', '會員名', 
     'account', 'username', 'userName', 'memberAccount', 'userAccount', 'loginName', 'memberName', 
-    'player', 'name', 'uid', 'userid', 'userId', 'playerId', 'playerid'
+    'player', 'name'
 ]
 USER_PARTIAL = ['account', 'user', '玩家', '会员', '會員', 'login', '帐号', '账号']
 
@@ -97,6 +98,7 @@ GAME_EXACT = [
 ]
 GAME_PARTIAL = ['lottery', 'game', '游戏', '遊戲', '玩法', '彩']
 
+# 新增大量 id 黑名單
 USER_EXCLUDE = [
     'time', 'date', 'level', 'agent', 'parent', 'type', 'status', 'ip', 
     'remark', 'game', 'lottery', 'group', 'code', '时间', '時間', 
@@ -105,7 +107,7 @@ USER_EXCLUDE = [
     'fee', 'vol', '单', '單', '奖', '獎', '盈', '亏', '銷', '销', '量', '额', '額',
     'rate', 'rtp', 'currency', 'device', 'platform', 'version',
     'orderid', 'recordid', 'logid', 'transid', 'history', 'bill', 'sn', '流水号', '订单号',
-    'merchant', '商户'
+    'merchant', '商户', 'id', 'uid', 'userid', 'user_id', 'playerid', 'agentid', 'merchantid'
 ]
 
 # --- 🎯 表頭精確隔離提取 (Game) ---
@@ -128,57 +130,76 @@ def find_game_column(df, forbidden_cols=None):
 # --- 🎯 表頭精確隔離提取 (Username) ---
 def find_user_column(df, forbidden_cols=None):
     """
-    暴力表頭匹配法：徹底解決短字串干擾，優先鎖定 API 的 "帐号" 表頭
+    資料本質絕對否決機制 (Data-First Hard Filter)：
+    不管表頭叫什麼，只要內容大部分是短數字(<=5)，就絕對不可能是帳號！無條件封殺。
     """
     if forbidden_cols is None: forbidden_cols = []
     
-    # 1. 🌟 無視所有防呆邏輯，直接進行最高優先級的「絕對精確表頭匹配」
-    cols_lower = [str(c).lower().strip() for c in df.columns]
-    for exact_val in USER_EXACT:
-        if exact_val.lower() in cols_lower:
-            orig_col = df.columns[cols_lower.index(exact_val.lower())]
-            if orig_col not in forbidden_cols:
-                return orig_col
-                
-    # 2. 移除底線/空白的精確匹配
-    cols_clean = [str(c).lower().replace('_', '').replace(' ', '') for c in df.columns]
-    for exact_val in USER_EXACT:
-        clean_val = exact_val.lower().replace('_', '').replace(' ', '')
-        if clean_val in cols_clean:
-            orig_col = df.columns[cols_clean.index(clean_val)]
-            if orig_col not in forbidden_cols:
-                return orig_col
-
-    # 3. 模糊匹配表頭
-    for p in USER_PARTIAL:
-        for i, c_str in enumerate(cols_lower):
-            orig_col = df.columns[i]
-            if orig_col in forbidden_cols: continue
-            if any(ext.lower() in c_str for ext in USER_EXCLUDE): continue
-            if p.lower() in c_str:
-                return orig_col
-
-    # 4. 終極數據嗅探 (只有在 API 表頭全變更的情況下才執行)
-    best_col = None
-    max_score = -9999
+    valid_cols = []
     
+    # --- 階段一：過濾掉「絕對不是帳號」的異常欄位 ---
     for c in df.columns:
         if c in forbidden_cols: continue
-        c_str = str(c).lower()
-        if any(k in c_str for k in USER_EXCLUDE): continue
         
         sample_data = df[c].dropna().astype(str).head(20).tolist()
         if not sample_data: continue
         
+        # 計算短數字 (例如 134, 444, 4) 的比例
         short_num_count = sum(1 for v in sample_data if v.strip().isdigit() and len(v.strip()) <= 5)
-        if short_num_count >= len(sample_data) * 0.4:
+        # 計算浮點數 (例如 123.45) 的比例
+        float_count = sum(1 for v in sample_data if '.' in v.strip() and v.strip().replace('.', '', 1).isdigit())
+        
+        # 🚨 如果有 30% 以上是純短數字 ID，或者浮點數，直接無條件封殺！
+        if short_num_count >= len(sample_data) * 0.3:
+            continue
+        if float_count >= len(sample_data) * 0.3:
             continue
             
+        valid_cols.append(c)
+
+    if not valid_cols:
+        return None  # 防禦性回傳
+
+    # --- 階段二：在安全的欄位中尋找帳號表頭 ---
+    cols_lower = {c: str(c).lower().strip() for c in valid_cols}
+    cols_clean = {c: str(c).lower().replace('_', '').replace(' ', '') for c in valid_cols}
+
+    # 1. 絕對精確匹配
+    for exact_val in USER_EXACT:
+        for c, c_lower in cols_lower.items():
+            if exact_val.lower() == c_lower:
+                return c
+                
+    # 2. 移除底線/空白的精確匹配
+    for exact_val in USER_EXACT:
+        clean_val = exact_val.lower().replace('_', '').replace(' ', '')
+        for c, c_clean in cols_clean.items():
+            if clean_val == c_clean:
+                return c
+
+    # 3. 模糊匹配 (排除黑名單)
+    for p in USER_PARTIAL:
+        for c, c_lower in cols_lower.items():
+            if any(ext.lower() in c_lower for ext in USER_EXCLUDE): continue
+            if p.lower() in c_lower:
+                return c
+
+    # 4. 終極數據嗅探 (找尋具備英數混合等真實帳號特徵的欄位)
+    best_col = None
+    max_score = -9999
+    
+    for c in valid_cols:
+        c_lower = cols_lower[c]
+        if any(k in c_lower for k in USER_EXCLUDE): continue
+        
+        sample_data = df[c].dropna().astype(str).head(20).tolist()
         score = 0
         for val in sample_data:
             val = val.strip()
+            # 大幅獎勵英數字元 (tao168)
             if re.search(r'[a-zA-Z]', val): 
                 score += 50
+            # 獎勵較長的純數字 (如手機號帳號)
             elif val.isdigit() and len(val) >= 6: 
                 score += 10
                 
@@ -188,8 +209,8 @@ def find_user_column(df, forbidden_cols=None):
             
     if best_col: return best_col
     
-    remaining = [c for c in df.columns if c not in forbidden_cols]
-    return remaining[0] if remaining else None
+    # 5. 最後安全備案：只從已經過濾掉「短數字」的合法欄位中挑選
+    return valid_cols[0] if valid_cols else None
 
 # --- 核心數據獲取模組 (API 串接) ---
 @st.cache_data(show_spinner=False, ttl=300)
