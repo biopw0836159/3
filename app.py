@@ -91,7 +91,7 @@ def get_mapped_col(df, exact_matches, partial_matches, exclude_keywords=None, fo
                 return orig_col
     return None
 
-# --- 嚴格定義 (明確界定 User 與 Game) ---
+# --- 嚴格定義 (明確界定 User 與 Game，確保優先抓取正確的中英文鍵值) ---
 USER_EXACT = [
     'userName', 'username', 'memberAccount', 'userAccount', 'account', 'loginName', 'memberName', 
     '会员账号', '會員帳號', '会员名', '會員名', '用户名', '用戶名', '账号', '帳號', 'player', 'name',
@@ -148,17 +148,27 @@ def find_game_column(df, forbidden_cols=None):
 # --- 🎯 嚴謹模式：真實數值探測器 (Data-Sniffing for Username) ---
 def find_user_column(df, forbidden_cols=None):
     """
-    貫徹「嚴謹模式」：徹底放棄包含小數點的任何數值！
-    防堵 `7559821.126`、`131`，強制鎖定英數混合的真實帳號 (如 quange555, f1718Q69z)。
+    精確微調版：封殺浮點數 (7559821.126) 與 短ID (131)。
+    但允許長數字串(如手機號)與英數混合的正常帳號 (如 quange555)。
     """
     if forbidden_cols is None: forbidden_cols = []
     
-    # 輔助函式：徹底辨識是否為數值（包含整數、浮點數、負數、千分位逗號）
-    def is_numeric_val(v):
-        clean_v = str(v).replace(',', '').strip()
-        # 匹配如 "131", "-45", "7559821.126" 等數值格式
-        return bool(re.match(r'^-?\d+(?:\.\d+)?$', clean_v))
-        
+    # 判斷是否為「絕對不是帳號」的數值 (浮點數 或 過短的純數字)
+    def is_strictly_invalid(v):
+        v_str = str(v).replace(',', '').strip()
+        if not v_str: return True
+        # 如果包含小數點，且是數值，那絕對是金額或 RTP，不是帳號
+        if '.' in v_str:
+            try: 
+                float(v_str)
+                return True
+            except ValueError: 
+                pass
+        # 如果是非常短的純數字(小於等於4位)，高機率是內部序號/ID (如 131)
+        if v_str.isdigit() and len(v_str) <= 4:
+            return True
+        return False
+
     best_col = None
     max_score = -9999
     
@@ -166,64 +176,75 @@ def find_user_column(df, forbidden_cols=None):
         if c in forbidden_cols: continue
         c_str = str(c).lower()
         
-        # 表頭若為明顯的內部ID，直接跳過
+        # 排除黑名單與自增短ID表頭
+        if any(k in c_str for k in USER_EXCLUDE): continue
         if c_str in ['id', 'uid', 'userid', 'user_id', 'no', 'sn']: continue
         
         sample_data = df[c].dropna().astype(str).head(15).tolist()
         if not sample_data: continue
         
-        # 🚨 一票否決防線一：包含彩種關鍵字，絕對跳過
+        # 🚨 防線一：包含彩種關鍵字，絕對跳過
         if any(any(gk in val for gk in ['彩', '分分', '选', '哈希', '波场', '以太坊', '赛车', '龙虎']) for val in sample_data):
             continue
             
-        # 🚨 一票否決防線二：如果整列「全部都是數值(含小數)」，直接封殺
-        is_all_numeric = all(is_numeric_val(v) for v in sample_data if str(v).strip())
-        if is_all_numeric:
-            continue
-            
         score = 0
+        invalid_count = 0
+        
         for val in sample_data:
             val = val.strip()
             if not val: continue
             
-            # 只要是數值，扣分拒絕
-            if is_numeric_val(val):
+            # 扣分：小數點數值或短序號
+            if is_strictly_invalid(val):
+                invalid_count += 1
                 score -= 50
             else:
-                # 終極大加分：標準真實帳號特徵 (英數混合，如 quange555, f1718Q69z)
+                # 加分：標準真實帳號特徵 (英數混合，如 quange555)
                 if re.match(r'^[a-zA-Z0-9_]{4,25}$', val) and re.search(r'[a-zA-Z]', val):
-                    score += 100
-                # 次級加分：純英文字母帳號
-                elif re.match(r'^[a-zA-Z_]{4,25}$', val):
                     score += 50
+                # 加分：純英文字母帳號
+                elif re.match(r'^[a-zA-Z_]{4,25}$', val):
+                    score += 30
+                # 加分：較長純數字 (可能是手機號綁定的帳號，這是之前誤殺的目標)
+                elif val.isdigit() and len(val) >= 5:
+                    score += 10
                     
+        # 如果整列都是無效的浮點數或短ID，直接封殺
+        if invalid_count == len([v for v in sample_data if v.strip()]):
+            continue
+            
         # 表頭加權
         if c_str in [x.lower() for x in USER_EXACT]:
-            score += 30
+            score += 100
         elif any(p.lower() in c_str for p in USER_PARTIAL):
-            score += 10
+            score += 30
             
-        if score > max_score and score > 0:
+        if score > max_score:
             max_score = score
             best_col = c
             
-    if best_col: 
+    if best_col and max_score > -50: 
         return best_col
 
-    # 降級方案：尋找第一個「非純數值(含小數)」且「非彩種」的欄位
+    # 降級方案：如果掃描不到完美特徵，才退回原本的表頭名稱匹配
+    col = get_mapped_col(df, USER_EXACT, USER_PARTIAL, exclude_keywords=USER_EXCLUDE, forbidden_cols=forbidden_cols)
+    if col: 
+        sample = df[col].dropna().astype(str).head(5).tolist()
+        if not any(any(gk in val for gk in ['彩', '分分', '哈希']) for val in sample) and not all(is_strictly_invalid(v) for v in sample):
+            return col
+                
+    # 最終降級安全策略 (挑選最乾淨、沒有彩種字眼且不是浮點數的欄位)
+    safe_cols = []
     for c in df.columns:
         if c in forbidden_cols: continue
-        sample = df[c].dropna().astype(str).head(15).tolist()
-        if not sample: continue
+        if any(k in str(c).lower() for k in USER_EXCLUDE): continue
+        if str(c).lower() in ['id', 'uid', 'userid', 'user_id']: continue
+        sample = df[c].dropna().astype(str).head(5).tolist()
+        if any(any(gk in val for gk in ['彩', '分分', '哈希']) for val in sample): continue
+        if all(is_strictly_invalid(v) for v in sample): continue
+        safe_cols.append(c)
         
-        is_pure_digit = all(is_numeric_val(v) for v in sample if str(v).strip())
-        is_game = any(any(gk in val for gk in ['彩', '分分', '哈希']) for val in sample)
-        
-        # 只要有一筆資料不是數值，且不是彩種，我們就當作備案
-        if not is_pure_digit and not is_game:
-            return c
-            
-    return None
+    return safe_cols[0] if safe_cols else (df.columns[0] if len(df.columns)>0 else None)
 
 # --- 核心數據獲取模組 (API 串接) ---
 @st.cache_data(show_spinner=False, ttl=300)
@@ -301,11 +322,12 @@ def run_audit_engine(df, rules, cols_map=None):
 
         temp_df = pd.DataFrame()
         
-        # 確保提取為精確字串型態，嚴格杜絕數值備案
+        # 確保提取為精確字串型態，恢復優雅備案機制
         if user_col and user_col in df.columns:
             temp_df['用戶名'] = df[user_col].astype(str).str.strip()
         else:
-            temp_df['用戶名'] = "找不到有效帳號(純數值已過濾)"
+            safe_cols = [c for c in df.columns if c != game_col and not any(k in str(c).lower() for k in USER_EXCLUDE)]
+            temp_df['用戶名'] = df[safe_cols[0]].astype(str).str.strip() if safe_cols else df.columns[0]
             
         def to_num(c_name):
             if c_name and c_name in df.columns:
@@ -385,7 +407,8 @@ def run_strict_audit(df, cfg):
         if user_col:
             clean_df['用戶名'] = df[user_col].astype(str).str.strip()
         else:
-            clean_df['用戶名'] = "找不到有效帳號(純數值已過濾)"
+            safe_cols = [c for c in df.columns if c not in forbidden and not any(k in str(c).lower() for k in USER_EXCLUDE)]
+            clean_df['用戶名'] = df[safe_cols[0]].astype(str).str.strip() if safe_cols else df.columns[0]
             
         clean_df['個人充值手續費'] = fee_s
         clean_df['個人派獎'] = win_s
