@@ -58,6 +58,7 @@ if not st.session_state.auth:
 
 # --- 通用欄位名稱匹配函數 (隔離機制) ---
 def get_mapped_col(df, exact_matches, partial_matches, exclude_keywords=None, forbidden_cols=None):
+    """基礎：根據 API 欄位 Header Name 進行匹配提取"""
     if exclude_keywords is None: exclude_keywords = []
     if forbidden_cols is None: forbidden_cols = []
         
@@ -91,17 +92,21 @@ def get_mapped_col(df, exact_matches, partial_matches, exclude_keywords=None, fo
                 return orig_col
     return None
 
-# --- 嚴格定義 (重新梳理：明確界定 User 與 Game，絕不重疊) ---
+# --- 嚴格定義 (明確界定 User 與 Game，確保優先抓取正確的中英文鍵值) ---
 USER_EXACT = [
-    'username', 'userName', 'memberAccount', 'userAccount', 'account', 'loginName', 'memberName', 'name', 'player',
-    '会员账号', '會員帳號', '会员名', '會員名', '用户名', '用戶名', '账号', '帳號', 
-    'userid', 'user_id', 'memberid', 'member_id', 'uid', 'accountid', 'account_id'
+    'userName', 'username', 'memberAccount', 'userAccount', 'account', 'loginName', 'memberName', 
+    '会员账号', '會員帳號', '会员名', '會員名', '用户名', '用戶名', '账号', '帳號', 'player', 'name',
+    'userId', 'user_id', 'uid' # 將純ID放最後，優先抓取字串帳號
 ]
-USER_PARTIAL = ['account', 'user', '玩家', '会员', '會員', 'member', 'login']
+USER_PARTIAL = ['account', 'user', '玩家', '会员', '會員', 'login']
 
-GAME_EXACT = ['lotteryName', 'gameName', 'platform', '彩种', '彩種', '平台', 'lottery', 'game']
+GAME_EXACT = [
+    'lotteryName', 'lottery_name', 'gameName', 'game_name', '彩种名称', '彩種名稱', 
+    '彩种', '彩種', 'lottery', 'game'
+]
 GAME_PARTIAL = ['lottery', 'game', '游戏', '遊戲', '玩法', '彩']
 
+# 排除會導致誤判的欄位（如訂單流水號、日期時間）
 USER_EXCLUDE = [
     'time', 'date', 'level', 'agent', 'parent', 'type', 'status', 'ip', 
     'remark', 'game', 'lottery', 'play', 'group', 'code', '时间', '時間', 
@@ -109,38 +114,86 @@ USER_EXCLUDE = [
     'bet', 'amount', 'profit', 'win', 'loss', 'count', 'payout', 'bonus', 
     'fee', 'vol', '单', '單', '奖', '獎', '盈', '亏', '銷', '销', '量', '额', '額',
     'rate', 'rtp', 'currency', 'device', 'platform', 'version',
-    'order', 'record', 'log', 'trans', 'history', 'bill', 'no', 'num', 'sn'
+    'orderid', 'recordid', 'logid', 'transid', 'history', 'bill', 'sn', '流水号', '订单号'
 ]
 
-# --- 🎯 嚴謹模式：真實數值探測器 (Data-Sniffing) ---
+# --- 🎯 嚴謹模式：真實數值探測器 (Data-Sniffing for Username) ---
 def find_user_column(df, forbidden_cols=None):
     """
-    此函數不僅依靠欄位名稱，當名稱失效時，會直接讀取 API 數據前 3 筆，
-    探測是否符合會員特徵 (例: a026026 / A1278A)。
+    貫徹「嚴謹模式」：不只靠 Header 名稱，若名稱失效或被混淆，
+    直接讀取 API 數據前 10 筆，探測是否符合會員特徵 (例: a026026 / a1234567a)。
     """
     if forbidden_cols is None: forbidden_cols = []
     
-    # 步驟一：常規名稱匹配
+    # 步驟一：常規精確名稱匹配 (優先採用 API 既定帳號欄位)
     col = get_mapped_col(df, USER_EXACT, USER_PARTIAL, exclude_keywords=USER_EXCLUDE, forbidden_cols=forbidden_cols)
     if col: return col
     
-    # 步驟二：嚴謹模式 - 探測真實數據內容 (針對如 a026026 的英數字混合)
+    # 步驟二：嚴謹模式 - 探測真實數據內容 (程序驗證，尋找類似 a026026 的帳號特徵)
+    best_col = None
+    max_score = 0
     for c in df.columns:
         if c in forbidden_cols: continue
         if any(k in str(c).lower() for k in USER_EXCLUDE): continue
         
-        sample_data = df[c].dropna().astype(str).head(3).tolist()
+        sample_data = df[c].dropna().astype(str).head(10).tolist()
         if not sample_data: continue
         
-        # 判斷條件：全部樣本均為 4~20 碼英數字組合，且至少包含一個英文字母 (避免抓到純數字流水號)
-        if all(re.match(r'^[a-zA-Z0-9_]{4,20}$', val) for val in sample_data):
-            if any(re.search(r'[a-zA-Z]', val) for val in sample_data): 
-                return c # 極高信心確定為帳號
+        score = 0
+        for val in sample_data:
+            val = val.strip()
+            # 驗證條件 1：全樣本均為 4~20 碼，且至少包含一個英文字母 (避免抓到純數字流水號)
+            if re.match(r'^[a-zA-Z0-9_]{4,20}$', val) and re.search(r'[a-zA-Z]', val):
+                score += 1
+            # 驗證條件 2：完全符合「英文字母開頭 + 英數混合」的經典帳號規則 (如 a026026) -> 加權分數
+            if re.match(r'^[a-zA-Z][a-zA-Z0-9]{4,15}$', val):
+                score += 2
                 
-    # 步驟三：最終降級策略
+        if score > max_score and score > 0:
+            max_score = score
+            best_col = c
+            
+    if best_col: return best_col
+                
+    # 步驟三：最終降級安全策略
     safe_cols = [c for c in df.columns if c not in forbidden_cols and not any(k in str(c).lower() for k in USER_EXCLUDE)]
     return safe_cols[0] if safe_cols else df.columns[0]
 
+# --- 🎯 嚴謹模式：真實數值探測器 (Data-Sniffing for Game Name) ---
+def find_game_column(df, forbidden_cols=None):
+    """
+    貫徹「嚴謹模式」：確保能精準抓取出 "TON五分彩"、"币安分分11选5" 等完整彩種名稱。
+    若 Header 名稱異常，直接透視內容特徵。
+    """
+    if forbidden_cols is None: forbidden_cols = []
+    
+    # 步驟一：常規精確名稱匹配
+    col = get_mapped_col(df, GAME_EXACT, GAME_PARTIAL, forbidden_cols=forbidden_cols)
+    if col: return col
+    
+    # 步驟二：數據探測 - 尋找內容包含特定彩種關鍵字的欄位
+    game_keywords = ['彩', '分分', '选', '飞艇', '赛车', '龙虎', 'TON', '币安', '百家乐', '轮盘', '六合', '特码', '大发']
+    best_col = None
+    max_score = 0
+    
+    for c in df.columns:
+        if c in forbidden_cols: continue
+        
+        sample_data = df[c].dropna().astype(str).head(10).tolist()
+        if not sample_data: continue
+        
+        score = 0
+        for val in sample_data:
+            # 若資料內容包含彩種核心詞彙，大幅加分
+            if any(k in val for k in game_keywords):
+                score += 1
+        
+        # 只要有高比例樣本符合彩種命名特徵，即鎖定該欄位
+        if score > max_score and score >= len(sample_data) * 0.3:
+            max_score = score
+            best_col = c
+            
+    return best_col
 
 # --- 核心數據獲取模組 (API 串接) ---
 @st.cache_data(show_spinner=False, ttl=300)
@@ -202,7 +255,7 @@ def run_audit_engine(df, rules, cols_map=None):
             user_col = find_user_column(df, forbidden_cols=forbidden)
             if user_col: forbidden.append(user_col)
             
-            game_col = get_mapped_col(df, GAME_EXACT, GAME_PARTIAL, forbidden_cols=forbidden)
+            game_col = find_game_column(df, forbidden_cols=forbidden)
             if game_col: forbidden.append(game_col)
             
             vol_col = get_mapped_col(df, ['betAmount', 'validBetAmount', '销量', '銷量', '总销量', '總銷量'], ['bet', '投注', '下注', '流水', 'vol', '销', '銷'], forbidden_cols=forbidden)
@@ -218,12 +271,12 @@ def run_audit_engine(df, rules, cols_map=None):
 
         temp_df = pd.DataFrame()
         
+        # 確保提取為精確字串型態，避免因 pandas 自動推斷導致數據失真
         if user_col and user_col in df.columns:
-            temp_df['用戶名'] = df[user_col].astype(str)
+            temp_df['用戶名'] = df[user_col].astype(str).str.strip()
         else:
-            # 最底層安全回退
             safe_cols = [c for c in df.columns if c != game_col and not any(k in str(c).lower() for k in USER_EXCLUDE)]
-            temp_df['用戶名'] = df[safe_cols[0]].astype(str) if safe_cols else df.columns[0]
+            temp_df['用戶名'] = df[safe_cols[0]].astype(str).str.strip() if safe_cols else df.columns[0]
             
         def to_num(c_name):
             if c_name and c_name in df.columns:
@@ -235,12 +288,14 @@ def run_audit_engine(df, rules, cols_map=None):
         temp_df['盈虧'] = to_num(profit_col)
         temp_df['獎金'] = to_num(bonus_col)
         
+        # 精準提取彩種名稱
         if game_col and game_col in df.columns:
-            temp_df['彩種'] = df[game_col].astype(str)
+            temp_df['彩種'] = df[game_col].astype(str).str.strip()
 
         agg_dict = {'銷量':'sum', '單數':'sum', '盈虧':'sum', '獎金':'sum'}
         if game_col and game_col in df.columns:
-            agg_dict['彩種'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
+            # 整合多彩種時，以逗號分隔保留原始名稱 (如: TON五分彩, 币安分分11选5)
+            agg_dict['彩種'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i) not in ['nan', 'None', '']]))))
 
         grouped = temp_df.groupby('用戶名').agg(agg_dict).reset_index()
         grouped['RTP'] = grouped.apply(lambda x: x['獎金'] / x['銷量'] if x['銷量'] > 0 else 0, axis=1)
@@ -274,12 +329,11 @@ def run_strict_audit(df, cfg):
         df.columns = [str(c).strip() for c in df.columns]
         last_col = df.columns[-1]
         
-        # 【嚴謹模式：順序至關重要】 先抓 User -> 加入隔離 -> 再抓其他
         forbidden = []
         user_col = find_user_column(df, forbidden_cols=forbidden)
         if user_col: forbidden.append(user_col)
         
-        game_col = get_mapped_col(df, GAME_EXACT, GAME_PARTIAL, forbidden_cols=forbidden)
+        game_col = find_game_column(df, forbidden_cols=forbidden)
         if game_col: forbidden.append(game_col)
         
         def get_col_val(keywords_exact, keywords_partial):
@@ -299,10 +353,10 @@ def run_strict_audit(df, cfg):
 
         clean_df = pd.DataFrame()
         if user_col:
-            clean_df['用戶名'] = df[user_col].astype(str)
+            clean_df['用戶名'] = df[user_col].astype(str).str.strip()
         else:
             safe_cols = [c for c in df.columns if c not in forbidden and not any(k in str(c).lower() for k in USER_EXCLUDE)]
-            clean_df['用戶名'] = df[safe_cols[0]].astype(str) if safe_cols else df.columns[0]
+            clean_df['用戶名'] = df[safe_cols[0]].astype(str).str.strip() if safe_cols else df.columns[0]
             
         clean_df['個人充值手續費'] = fee_s
         clean_df['個人派獎'] = win_s
@@ -312,10 +366,10 @@ def run_strict_audit(df, cfg):
         if profit_col: clean_df['盈虧'] = pd.to_numeric(df[profit_col].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
         else: clean_df['盈虧'] = pd.to_numeric(df[last_col].astype(str).str.replace(r',', '', regex=True), errors='coerce').fillna(0)
         
-        if game_col: clean_df['彩種'] = df[game_col].astype(str)
+        if game_col: clean_df['彩種'] = df[game_col].astype(str).str.strip()
 
         agg_dict = {'個人充值手續費':'sum','個人派獎':'sum','個人自身返點/返水':'sum','個人系統分紅':'sum','盈虧':'sum'}
-        if game_col: agg_dict['彩種'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
+        if game_col: agg_dict['彩種'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i) not in ['nan', 'None', '']]))))
 
         grouped = clean_df.groupby('用戶名').agg(agg_dict).reset_index()
         
@@ -385,7 +439,7 @@ if mode == "用戶彩票分析":
         auto_u = find_user_column(raw, forbidden_cols=forbidden_ui)
         if auto_u: forbidden_ui.append(auto_u)
         
-        auto_g = get_mapped_col(raw, GAME_EXACT, GAME_PARTIAL, forbidden_cols=forbidden_ui)
+        auto_g = find_game_column(raw, forbidden_cols=forbidden_ui)
         if auto_g: forbidden_ui.append(auto_g)
         
         auto_v = get_mapped_col(raw, ['betAmount', 'validBetAmount', '销量', '銷量', '总销量', '總銷量'], ['bet', '投注', '下注', '流水', 'vol', '销', '銷'], forbidden_cols=forbidden_ui)
@@ -416,7 +470,7 @@ if mode == "用戶彩票分析":
 
         game_col = cols_map_a['g']
         if game_col and game_col in all_cols:
-            all_games = sorted(raw[game_col].astype(str).dropna().unique().tolist())
+            all_games = sorted(raw[game_col].astype(str).str.strip().dropna().unique().tolist())
 
     with st.sidebar:
         st.markdown("### 🎯 彩種篩選 (可複選)")
@@ -447,7 +501,7 @@ if mode == "用戶彩票分析":
                         raw = raw[(raw[t_col] >= dt_start_a) & (raw[t_col] <= dt_end_a)]
 
             if selected_games and game_col and game_col in raw.columns:
-                raw = raw[raw[game_col].isin(selected_games)]
+                raw = raw[raw[game_col].astype(str).str.strip().isin(selected_games)]
                 
             if raw.empty: st.warning("⚠️ 經過時間或彩種條件篩選後，查無符合的數據。請放寬篩選條件。")
             else:
@@ -478,6 +532,7 @@ if mode == "用戶彩票分析":
                             else: st.session_state.read_set_a.discard(u)
                             style = "color:#94a3b8; text-decoration:line-through;" if is_read else "color:#1e293b;"
                             
+                            # 顯示的帳號與彩種已過濾提取，能確保呈現如 "a026026", "TON五分彩" 等精確格式
                             cols[1].markdown(f"<span style='{style}'>{u}</span>", unsafe_allow_html=True)
                             cols[2].markdown(f"<span style='{style}'>{row.get('彩種', '-')}</span>", unsafe_allow_html=True)
                             cols[3].markdown(f"<span class='badge-red'>{row['原因']}</span>", unsafe_allow_html=True)
@@ -520,9 +575,9 @@ else:
         user_col_b = find_user_column(raw_b, forbidden_cols=forbidden_ui_b)
         if user_col_b: forbidden_ui_b.append(user_col_b)
         
-        game_col_b = get_mapped_col(raw_b, GAME_EXACT, GAME_PARTIAL, forbidden_cols=forbidden_ui_b)
+        game_col_b = find_game_column(raw_b, forbidden_cols=forbidden_ui_b)
         
-        if game_col_b: all_games_b = sorted(raw_b[game_col_b].astype(str).dropna().unique().tolist())
+        if game_col_b: all_games_b = sorted(raw_b[game_col_b].astype(str).str.strip().dropna().unique().tolist())
 
     with st.sidebar:
         st.markdown("### 🎯 彩種篩選 (可複選)")
@@ -563,7 +618,7 @@ else:
                         raw_b[t_col_b] = pd.to_datetime(raw_b[t_col_b], errors='coerce')
                         raw_b = raw_b[(raw_b[t_col_b] >= dt_start_b) & (raw_b[t_col_b] <= dt_end_b)]
 
-            if selected_games_b and game_col_b: raw_b = raw_b[raw_b[game_col_b].isin(selected_games_b)]
+            if selected_games_b and game_col_b: raw_b = raw_b[raw_b[game_col_b].astype(str).str.strip().isin(selected_games_b)]
 
             if raw_b.empty: st.warning("⚠️ 經過時間或彩種條件篩選後，查無符合的數據。請放寬篩選條件。")
             else:
