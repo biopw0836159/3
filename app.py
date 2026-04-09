@@ -95,7 +95,7 @@ def get_mapped_col(df, exact_matches, partial_matches, exclude_keywords=None, fo
 USER_EXACT = [
     'userName', 'username', 'memberAccount', 'userAccount', 'account', 'loginName', 'memberName', 
     '会员账号', '會員帳號', '会员名', '會員名', '用户名', '用戶名', '账号', '帳號', 'player', 'name',
-    'userId', 'user_id', 'uid'
+    'userId', 'user_id', 'uid', 'playerId', 'player_id'
 ]
 USER_PARTIAL = ['account', 'user', '玩家', '会员', '會員', 'login']
 
@@ -119,7 +119,7 @@ USER_EXCLUDE = [
 def find_game_column(df, forbidden_cols=None):
     if forbidden_cols is None: forbidden_cols = []
     
-    game_keywords = ['彩', '分分', '选', '飞艇', '赛车', '龙虎', 'TON', '币安', '百家乐', '轮盘', '六合', '特码', '大发', '哈希', '波场', '以太坊']
+    game_keywords = ['彩', '分分', '选', '飞艇', '赛车', '龙虎', 'TON', '币安', '百家乐', '轮盘', '六合', '特码', '大发', '哈希', '波场', '以太坊', '运动会', '体育', '真人', '电子', '电竞', '棋牌']
     best_col = None
     max_score = 0
     
@@ -148,24 +148,18 @@ def find_game_column(df, forbidden_cols=None):
 # --- 🎯 嚴謹模式：真實數值探測器 (Data-Sniffing for Username) ---
 def find_user_column(df, forbidden_cols=None):
     """
-    精確微調版：封殺浮點數 (7559821.126) 與 短ID (131)。
-    但允許長數字串(如手機號)與英數混合的正常帳號 (如 quange555)。
+    精確微調版：加入互斥鎖與統計學判定，徹底解決彩種誤認為帳號的問題。
     """
     if forbidden_cols is None: forbidden_cols = []
     
-    # 判斷是否為「絕對不是帳號」的數值 (浮點數 或 過短的純數字)
     def is_strictly_invalid(v):
         v_str = str(v).replace(',', '').strip()
         if not v_str: return True
-        # 如果包含小數點，且是數值，那絕對是金額或 RTP，不是帳號
         if '.' in v_str:
-            try: 
-                float(v_str)
-                return True
-            except ValueError: 
-                pass
-        # 如果是非常短的純數字(小於等於4位)，高機率是內部序號/ID (如 131)
-        if v_str.isdigit() and len(v_str) <= 4:
+            try: float(v_str); return True
+            except ValueError: pass
+        # 非常短的純數字通常是內部 index，排除掉
+        if v_str.isdigit() and len(v_str) <= 3:
             return True
         return False
 
@@ -176,15 +170,16 @@ def find_user_column(df, forbidden_cols=None):
         if c in forbidden_cols: continue
         c_str = str(c).lower()
         
-        # 排除黑名單與自增短ID表頭
+        # 排除黑名單與絕對不要的純 index 表頭
         if any(k in c_str for k in USER_EXCLUDE): continue
-        if c_str in ['id', 'uid', 'userid', 'user_id', 'no', 'sn']: continue
+        if c_str in ['id', 'no', 'sn', 'index']: continue
         
-        sample_data = df[c].dropna().astype(str).head(15).tolist()
+        sample_data = df[c].dropna().astype(str).head(20).tolist()
         if not sample_data: continue
         
-        # 🚨 防線一：包含彩種關鍵字，絕對跳過
-        if any(any(gk in val for gk in ['彩', '分分', '选', '哈希', '波场', '以太坊', '赛车', '龙虎']) for val in sample_data):
+        # 🚨 統計學防線：如果這個欄位有高達 40% 以上都包含彩種關鍵字，那絕對是彩種欄位 (允許少數玩家取名有'彩'字)
+        game_kw_count = sum(1 for val in sample_data if any(gk in val for gk in ['彩', '分分', '选', '哈希', '波场', '以太坊', '赛车', '龙虎', '体育', '电子', '百家乐']))
+        if game_kw_count >= len(sample_data) * 0.4:
             continue
             
         score = 0
@@ -194,30 +189,25 @@ def find_user_column(df, forbidden_cols=None):
             val = val.strip()
             if not val: continue
             
-            # 扣分：小數點數值或短序號
             if is_strictly_invalid(val):
                 invalid_count += 1
                 score -= 50
             else:
-                # 加分：標準真實帳號特徵 (英數混合，如 quange555)
                 if re.match(r'^[a-zA-Z0-9_]{4,25}$', val) and re.search(r'[a-zA-Z]', val):
                     score += 50
-                # 加分：純英文字母帳號
                 elif re.match(r'^[a-zA-Z_]{4,25}$', val):
                     score += 30
-                # 加分：較長純數字 (可能是手機號綁定的帳號，這是之前誤殺的目標)
-                elif val.isdigit() and len(val) >= 5:
+                elif val.isdigit() and len(val) >= 4:
                     score += 10
                     
-        # 如果整列都是無效的浮點數或短ID，直接封殺
         if invalid_count == len([v for v in sample_data if v.strip()]):
             continue
             
-        # 表頭加權
+        # 表頭最高加權 (精準打擊)
         if c_str in [x.lower() for x in USER_EXACT]:
-            score += 100
+            score += 1000  # 直接保送
         elif any(p.lower() in c_str for p in USER_PARTIAL):
-            score += 30
+            score += 300
             
         if score > max_score:
             max_score = score
@@ -226,25 +216,33 @@ def find_user_column(df, forbidden_cols=None):
     if best_col and max_score > -50: 
         return best_col
 
-    # 降級方案：如果掃描不到完美特徵，才退回原本的表頭名稱匹配
+    # 降級方案
     col = get_mapped_col(df, USER_EXACT, USER_PARTIAL, exclude_keywords=USER_EXCLUDE, forbidden_cols=forbidden_cols)
     if col: 
-        sample = df[col].dropna().astype(str).head(5).tolist()
-        if not any(any(gk in val for gk in ['彩', '分分', '哈希']) for val in sample) and not all(is_strictly_invalid(v) for v in sample):
+        sample = df[col].dropna().astype(str).head(10).tolist()
+        game_kw_cnt = sum(1 for v in sample if any(gk in v for gk in ['彩', '分分', '哈希']))
+        if game_kw_cnt < len(sample) * 0.4 and not all(is_strictly_invalid(v) for v in sample):
             return col
                 
-    # 最終降級安全策略 (挑選最乾淨、沒有彩種字眼且不是浮點數的欄位)
+    # 最終安全策略：絕對排除被標記為 forbidden_cols 的彩種欄位
     safe_cols = []
     for c in df.columns:
         if c in forbidden_cols: continue
-        if any(k in str(c).lower() for k in USER_EXCLUDE): continue
-        if str(c).lower() in ['id', 'uid', 'userid', 'user_id']: continue
-        sample = df[c].dropna().astype(str).head(5).tolist()
-        if any(any(gk in val for gk in ['彩', '分分', '哈希']) for val in sample): continue
+        c_str_lower = str(c).lower()
+        if any(k in c_str_lower for k in USER_EXCLUDE): continue
+        if c_str_lower in ['id', 'no', 'sn']: continue
+        sample = df[c].dropna().astype(str).head(10).tolist()
+        game_kw_cnt = sum(1 for v in sample if any(gk in v for gk in ['彩', '分分', '哈希']))
+        if game_kw_cnt >= len(sample) * 0.4: continue
         if all(is_strictly_invalid(v) for v in sample): continue
         safe_cols.append(c)
         
-    return safe_cols[0] if safe_cols else (df.columns[0] if len(df.columns)>0 else None)
+    if safe_cols: 
+        return safe_cols[0]
+        
+    # 如果真的找不到，挑選一個不是 forbidden_cols (非彩種) 的欄位來當作帳號
+    remaining = [c for c in df.columns if c not in forbidden_cols]
+    return remaining[0] if remaining else None
 
 # --- 核心數據獲取模組 (API 串接) ---
 @st.cache_data(show_spinner=False, ttl=300)
@@ -300,7 +298,7 @@ def run_audit_engine(df, rules, cols_map=None):
             profit_col = cols_map.get('p')
             bonus_col = cols_map.get('b')
         else:
-            # 🌟 【嚴謹模式：順序重構】 先抓彩種 -> 加入隔離 -> 再抓帳號 (徹底避免將彩種錯當帳號)
+            # 🌟 嚴謹模式重構：保證互斥
             forbidden = []
             
             game_col = find_game_column(df, forbidden_cols=forbidden)
@@ -309,7 +307,7 @@ def run_audit_engine(df, rules, cols_map=None):
             user_col = find_user_column(df, forbidden_cols=forbidden)
             if user_col: forbidden.append(user_col)
             
-            vol_col = get_mapped_col(df, ['betAmount', 'validBetAmount', '销量', '銷量', '总销量', '總銷量'], ['bet', '投注', '下注', '流水', 'vol', '销', '銷'], forbidden_cols=forbidden)
+            vol_col = get_mapped_col(df, ['betAmount', 'validBetAmount', '销量', '銷量', '总销量', '總銷量', '投注金额'], ['bet', '投注', '下注', '流水', 'vol', '销', '銷'], forbidden_cols=forbidden)
             if vol_col: forbidden.append(vol_col)
                 
             cnt_col = get_mapped_col(df, ['betCount', '单数', '單數', '总单数', '總單數'], ['count', '次数', '次數', '笔数', '筆數', 'cnt', '单', '單'], forbidden_cols=forbidden)
@@ -322,12 +320,16 @@ def run_audit_engine(df, rules, cols_map=None):
 
         temp_df = pd.DataFrame()
         
-        # 確保提取為精確字串型態，恢復優雅備案機制
-        if user_col and user_col in df.columns:
+        # 強制隔離備案：確切保證 user_col 不是 game_col
+        if user_col and user_col in df.columns and user_col != game_col:
             temp_df['用戶名'] = df[user_col].astype(str).str.strip()
         else:
             safe_cols = [c for c in df.columns if c != game_col and not any(k in str(c).lower() for k in USER_EXCLUDE)]
-            temp_df['用戶名'] = df[safe_cols[0]].astype(str).str.strip() if safe_cols else df.columns[0]
+            if safe_cols:
+                temp_df['用戶名'] = df[safe_cols[0]].astype(str).str.strip()
+            else:
+                remain = [c for c in df.columns if c != game_col]
+                temp_df['用戶名'] = df[remain[0]].astype(str).str.strip() if remain else df.index.astype(str)
             
         def to_num(c_name):
             if c_name and c_name in df.columns:
@@ -345,7 +347,6 @@ def run_audit_engine(df, rules, cols_map=None):
 
         agg_dict = {'銷量':'sum', '單數':'sum', '盈虧':'sum', '獎金':'sum'}
         if game_col and game_col in df.columns:
-            # 整合多彩種時，以逗號分隔保留原始名稱
             agg_dict['彩種'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i) not in ['nan', 'None', '']]))))
 
         grouped = temp_df.groupby('用戶名').agg(agg_dict).reset_index()
@@ -380,7 +381,7 @@ def run_strict_audit(df, cfg):
         df.columns = [str(c).strip() for c in df.columns]
         last_col = df.columns[-1]
         
-        # 🌟 【嚴謹模式：順序重構】 引擎B 也必須先抓彩種再抓帳號
+        # 🌟 嚴謹模式：引擎B 優先隔離彩種
         forbidden = []
         game_col = find_game_column(df, forbidden_cols=forbidden)
         if game_col: forbidden.append(game_col)
@@ -396,7 +397,7 @@ def run_strict_audit(df, cfg):
             return None, pd.Series([0.0]*len(df), index=df.index)
 
         col_fee_name, fee_s = get_col_val(['个人充值手续费', '個人充值手續費', '充值手续费', '充值手續費', '充值', 'depositAmount', 'deposit'], ['充值', 'deposit'])
-        col_win_name, win_s = get_col_val(['个人派奖', '個人派獎', '派奖', '派獎', '总派奖', '總派獎', '销量', '銷量', 'betAmount', 'validBetAmount'], ['派奖', '派獎', 'payOut', '销量', '銷量', 'bet'])
+        col_win_name, win_s = get_col_val(['个人派奖', '個人派獎', '派奖', '派獎', '总派奖', '總派獎', '销量', '銷量', '投注金额', 'betAmount', 'validBetAmount'], ['派奖', '派獎', 'payOut', '销量', '銷量', 'bet'])
         col_fs_name, fs_s = get_col_val(['个人自身返点/返水', '個人自身返點/返水', '个人自身返点', '個人自身返點', '个人返水', '個人返水', '返点', '返點', '返水'], ['返点', '返點', '返水', 'rebate'])
         col_fh_name, fh_s = get_col_val(['个人系统分红', '個人系統分红', '系统分红', '系統分紅', '分红', '分紅'], ['分红', '分紅', 'dividend'])
         
@@ -404,11 +405,17 @@ def run_strict_audit(df, cfg):
         if profit_col: forbidden.append(profit_col)
 
         clean_df = pd.DataFrame()
-        if user_col:
+        
+        # 強制隔離備案：確切保證 user_col 不是 game_col
+        if user_col and user_col != game_col:
             clean_df['用戶名'] = df[user_col].astype(str).str.strip()
         else:
             safe_cols = [c for c in df.columns if c not in forbidden and not any(k in str(c).lower() for k in USER_EXCLUDE)]
-            clean_df['用戶名'] = df[safe_cols[0]].astype(str).str.strip() if safe_cols else df.columns[0]
+            if safe_cols:
+                clean_df['用戶名'] = df[safe_cols[0]].astype(str).str.strip()
+            else:
+                remain = [c for c in df.columns if c not in forbidden]
+                clean_df['用戶名'] = df[remain[0]].astype(str).str.strip() if remain else df.index.astype(str)
             
         clean_df['個人充值手續費'] = fee_s
         clean_df['個人派獎'] = win_s
@@ -486,7 +493,7 @@ if mode == "用戶彩票分析":
             
         all_cols = raw.columns.tolist()
         
-        # 🌟 【嚴謹模式】徹底自動化推論，不依賴手動指定
+        # 🌟 嚴謹模式：引擎A UI層優先隔離彩種
         forbidden_ui = []
         
         auto_g = find_game_column(raw, forbidden_cols=forbidden_ui)
@@ -495,7 +502,7 @@ if mode == "用戶彩票分析":
         auto_u = find_user_column(raw, forbidden_cols=forbidden_ui)
         if auto_u: forbidden_ui.append(auto_u)
         
-        auto_v = get_mapped_col(raw, ['betAmount', 'validBetAmount', '销量', '銷量', '总销量', '總銷量'], ['bet', '投注', '下注', '流水', 'vol', '销', '銷'], forbidden_cols=forbidden_ui)
+        auto_v = get_mapped_col(raw, ['betAmount', 'validBetAmount', '销量', '銷量', '总销量', '總銷量', '投注金额'], ['bet', '投注', '下注', '流水', 'vol', '销', '銷'], forbidden_cols=forbidden_ui)
         if auto_v: forbidden_ui.append(auto_v)
             
         auto_c = get_mapped_col(raw, ['betCount', '单数', '單數', '总单数', '總單數'], ['count', '次数', '次數', '笔数', '筆數', 'cnt', '单', '單'], forbidden_cols=forbidden_ui)
@@ -610,7 +617,7 @@ else:
             st.session_state.read_set_b = set()
             st.session_state.last_req_b = req_hash_b
             
-        # 🌟 【嚴謹模式】自動化解析
+        # 🌟 嚴謹模式：自動化解析
         forbidden_ui_b = []
         
         game_col_b = find_game_column(raw_b, forbidden_cols=forbidden_ui_b)
