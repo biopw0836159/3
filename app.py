@@ -55,41 +55,45 @@ if not st.session_state.auth:
             else: st.error("❌ 密碼錯誤")
     st.stop()
 
-# --- 通用欄位名稱匹配函數 (極致嚴謹修正版) ---
+# --- 通用欄位名稱匹配函數 (權重優先級優化版) ---
 def get_mapped_col(df, exact_matches, partial_matches, exclude_keywords=None):
-    """優先進行全字精確匹配，避免錯抓。若無精確匹配再使用模糊比對(嚴格排除特定關鍵字)。"""
+    """優先以我們定義的關鍵字列表順序進行精確匹配，確保高優先級欄位(如帳號字串)被先選中，避免誤抓ID。"""
     if exclude_keywords is None:
         exclude_keywords = []
         
-    # 1. 完全精確匹配 (忽略大小寫與首尾空格)
-    for c in df.columns:
-        if str(c).lower().strip() in [x.lower() for x in exact_matches]: 
-            return c
+    # 準備 df 的欄位以便比對
+    cols_lower = [str(c).lower().strip() for c in df.columns]
+    cols_clean = [str(c).lower().replace('_', '').replace(' ', '') for c in df.columns]
+
+    # 1. 完全精確匹配 (依照 exact_matches 的優先級，而非 df.columns 的順序)
+    for exact_val in exact_matches:
+        exact_lower = exact_val.lower()
+        if exact_lower in cols_lower:
+            return df.columns[cols_lower.index(exact_lower)]
             
-    # 2. 去除底線與空格的精確匹配 (針對如 user_name -> username)
-    for c in df.columns:
-        c_clean = str(c).lower().replace('_', '').replace(' ', '')
-        for x in exact_matches:
-            if c_clean == x.lower().replace('_', '').replace(' ', ''):
-                return c
+    # 2. 去除底線與空格的精確匹配
+    for exact_val in exact_matches:
+        exact_clean = exact_val.lower().replace('_', '').replace(' ', '')
+        if exact_clean in cols_clean:
+            return df.columns[cols_clean.index(exact_clean)]
                 
-    # 3. 模糊匹配 (嚴格排除干擾字)
-    for c in df.columns:
-        c_str = str(c).lower().strip()
-        if any(ext.lower() in c_str for ext in exclude_keywords):
-            continue
-        if any(p.lower() in c_str for p in partial_matches): 
-            return c
+    # 3. 模糊匹配 (嚴格排除干擾字，依照 partial_matches 的優先級)
+    for p in partial_matches:
+        p_lower = p.lower()
+        for i, c_str in enumerate(cols_lower):
+            if any(ext.lower() in c_str for ext in exclude_keywords):
+                continue
+            if p_lower in c_str:
+                return df.columns[i]
     return None
 
-# 定義高度共用的用戶名匹配規則，擴增 userId, uid，並調整排除清單防呆
+# 定義高度共用的用戶名匹配規則 (將明確的帳號字串排在最前面，ID排在後面作降級備用)
 USER_EXACT = [
-    'userName', 'username', '用户名', '用戶名', '账号', '帳號', '会员账号', '會員帳號', 
-    '会员名', '會員名', 'memberName', 'loginName', 'name', 'account', 'uname', 'player', 
-    'userid', 'user_id', 'memberid', 'member_id', 'uid', 'accountid', 'account_id', 
-    'memberaccount', 'useraccount'
+    'memberAccount', 'userAccount', 'userName', 'username', 'memberName', 'account', 'loginName', 'name', 'uname', 'player',
+    '会员账号', '會員帳號', '会员名', '會員名', '用户名', '用戶名', '账号', '帳號', 
+    'userid', 'user_id', 'memberid', 'member_id', 'uid', 'accountid', 'account_id'
 ]
-USER_PARTIAL = ['user', 'account', '玩家', '会员', '會員', 'member', 'name', 'login']
+USER_PARTIAL = ['account', 'user', '玩家', '会员', '會員', 'member', 'name', 'login']
 # 關鍵修正：移除了直接排除 'id'，改為精準排除不相干的資料與 metrics 欄位
 USER_EXCLUDE = [
     'time', 'date', 'level', 'agent', 'parent', 'type', 'status', 'ip', 
@@ -352,7 +356,7 @@ if mode == "用戶彩票分析":
             
         all_cols = raw.columns.tolist()
         
-        # 自動預測欄位
+        # 自動預測欄位 (這裡會因為新版權重函數而精準抓住字串帳號)
         auto_u = get_mapped_col(raw, USER_EXACT, USER_PARTIAL, exclude_keywords=USER_EXCLUDE)
         auto_v = get_mapped_col(raw, ['betAmount', 'validBetAmount', '销量', '銷量', '总销量', '總銷量'], ['bet', '投注', '下注', '流水', 'vol', '销', '銷'])
         auto_c = get_mapped_col(raw, ['betCount', '单数', '單數', '总单数', '總單數'], ['count', '次数', '次數', '笔数', '筆數', 'cnt', '单', '單'])
