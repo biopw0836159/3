@@ -105,7 +105,6 @@ GAME_EXACT = [
 ]
 GAME_PARTIAL = ['lottery', 'game', '游戏', '遊戲', '玩法', '彩']
 
-# 🎯 嚴謹模式修復：移除了 'count', 'play'，避免將 'account' 或 'player' 誤殺
 USER_EXCLUDE = [
     'time', 'date', 'level', 'agent', 'parent', 'type', 'status', 'ip', 
     'remark', 'game', 'lottery', 'group', 'code', '时间', '時間', 
@@ -149,9 +148,8 @@ def find_game_column(df, forbidden_cols=None):
 # --- 🎯 嚴謹模式：真實數值探測器 (Data-Sniffing for Username) ---
 def find_user_column(df, forbidden_cols=None):
     """
-    貫徹「嚴謹模式」：徹底放棄單純依賴表頭名稱！
-    完全使用程式掃描資料內容特徵。嚴格過濾掉如 131、431 這種純數字短ID，
-    精準鎖定包含英數混合的真實帳號 (如 quange555, Ly3333, f1718Q69z)。
+    貫徹「嚴謹模式」：徹底放棄純數字！
+    完全封殺純數字欄位（如 131, 431, 3），強制鎖定包含英數混合的真實帳號 (如 quange555, f1718Q69z)。
     """
     if forbidden_cols is None: forbidden_cols = []
     
@@ -162,48 +160,43 @@ def find_user_column(df, forbidden_cols=None):
         if c in forbidden_cols: continue
         c_str = str(c).lower()
         
-        # 排除黑名單與自增短ID表頭
-        if any(k in c_str for k in USER_EXCLUDE): continue
-        if c_str in ['id', 'uid', 'userid', 'user_id', 'no']: continue
+        # 表頭若為明顯的內部ID，直接跳過
+        if c_str in ['id', 'uid', 'userid', 'user_id', 'no', 'sn']: continue
         
         sample_data = df[c].dropna().astype(str).head(15).tolist()
         if not sample_data: continue
         
-        # 🚨 一票否決防線：包含彩種關鍵字，絕對跳過
+        # 🚨 一票否決防線一：包含彩種關鍵字，絕對跳過
         if any(any(gk in val for gk in ['彩', '分分', '选', '哈希', '波场', '以太坊', '赛车', '龙虎']) for val in sample_data):
             continue
             
         score = 0
-        is_pure_short = True
+        is_pure_digit_col = True
         
         for val in sample_data:
             val = val.strip()
             if not val: continue
             
-            # 扣分：短數字 (例如 131, 3, 34) 絕對不是我們要的真實帳號名稱
-            if val.isdigit() and len(val) <= 4:
-                score -= 20
+            if val.isdigit():
+                score -= 50  # 堅決拒絕純數字
             else:
-                is_pure_short = False
-                # 大加分：標準真實帳號特徵 (英數混合，如 quange555)
-                if re.match(r'^[a-zA-Z0-9_]{4,20}$', val) and re.search(r'[a-zA-Z]', val):
-                    score += 20
-                # 中加分：純英文字母帳號
-                elif re.match(r'^[a-zA-Z_]{4,20}$', val):
-                    score += 10
-                # 小加分：較長純數字 (可能是手機號綁定的帳號)
-                elif val.isdigit() and len(val) >= 5:
-                    score += 5
+                is_pure_digit_col = False
+                # 終極大加分：標準真實帳號特徵 (英數混合，如 quange555, f1718Q69z)
+                if re.match(r'^[a-zA-Z0-9_]{4,25}$', val) and re.search(r'[a-zA-Z]', val):
+                    score += 100
+                # 次級加分：純英文字母帳號
+                elif re.match(r'^[a-zA-Z_]{4,25}$', val):
+                    score += 50
                     
-        # 如果這列全部都是短數字 (131 等)，即使表頭對了也直接封殺，不當作帳號欄位
-        if is_pure_short and score < 0:
+        # 🚨 一票否決防線二：如果整列「全部都是純數字」，直接封殺，絕對不當作帳號
+        if is_pure_digit_col:
             continue
             
-        # 如果數據特徵符合，且表頭也是常規的帳號名稱，額外賦予權重
+        # 表頭加權
         if c_str in [x.lower() for x in USER_EXACT]:
-            score += 15
+            score += 30
         elif any(p.lower() in c_str for p in USER_PARTIAL):
-            score += 5
+            score += 10
             
         if score > max_score and score > 0:
             max_score = score
@@ -212,24 +205,20 @@ def find_user_column(df, forbidden_cols=None):
     if best_col: 
         return best_col
 
-    # 降級方案：如果掃描不到完美特徵，才退回原本的表頭名稱匹配
-    col = get_mapped_col(df, USER_EXACT, USER_PARTIAL, exclude_keywords=USER_EXCLUDE, forbidden_cols=forbidden_cols)
-    if col: 
-        sample = df[col].dropna().astype(str).head(5).tolist()
-        if not any(any(gk in val for gk in ['彩', '分分', '哈希']) for val in sample):
-            return col
-                
-    # 最終降級安全策略 (挑選最乾淨、沒有彩種字眼的欄位)
-    safe_cols = []
+    # 降級方案：尋找第一個「非純數字」且「非彩種」的欄位
     for c in df.columns:
         if c in forbidden_cols: continue
-        if any(k in str(c).lower() for k in USER_EXCLUDE): continue
-        if str(c).lower() in ['id', 'uid', 'userid', 'user_id']: continue
-        sample = df[c].dropna().astype(str).head(5).tolist()
-        if any(any(gk in val for gk in ['彩', '分分', '哈希']) for val in sample): continue
-        safe_cols.append(c)
+        sample = df[c].dropna().astype(str).head(15).tolist()
+        if not sample: continue
         
-    return safe_cols[0] if safe_cols else (df.columns[0] if len(df.columns)>0 else None)
+        is_pure_digit = all(val.strip().isdigit() for val in sample if val.strip())
+        is_game = any(any(gk in val for gk in ['彩', '分分', '哈希']) for val in sample)
+        
+        # 只要有一筆資料不是純數字，我們就當作備案
+        if not is_pure_digit and not is_game:
+            return c
+            
+    return None
 
 # --- 核心數據獲取模組 (API 串接) ---
 @st.cache_data(show_spinner=False, ttl=300)
@@ -307,12 +296,11 @@ def run_audit_engine(df, rules, cols_map=None):
 
         temp_df = pd.DataFrame()
         
-        # 確保提取為精確字串型態，避免因 pandas 自動推斷導致數據失真
+        # 確保提取為精確字串型態，嚴格杜絕純數字備案
         if user_col and user_col in df.columns:
             temp_df['用戶名'] = df[user_col].astype(str).str.strip()
         else:
-            safe_cols = [c for c in df.columns if c != game_col and not any(k in str(c).lower() for k in USER_EXCLUDE)]
-            temp_df['用戶名'] = df[safe_cols[0]].astype(str).str.strip() if safe_cols else df.columns[0]
+            temp_df['用戶名'] = "找不到有效帳號(純數字已過濾)"
             
         def to_num(c_name):
             if c_name and c_name in df.columns:
@@ -392,8 +380,7 @@ def run_strict_audit(df, cfg):
         if user_col:
             clean_df['用戶名'] = df[user_col].astype(str).str.strip()
         else:
-            safe_cols = [c for c in df.columns if c not in forbidden and not any(k in str(c).lower() for k in USER_EXCLUDE)]
-            clean_df['用戶名'] = df[safe_cols[0]].astype(str).str.strip() if safe_cols else df.columns[0]
+            clean_df['用戶名'] = "找不到有效帳號(純數字已過濾)"
             
         clean_df['個人充值手續費'] = fee_s
         clean_df['個人派獎'] = win_s
