@@ -56,18 +56,18 @@ if not st.session_state.auth:
 def find_best_column(df, category, exclude_cols=None):
     if exclude_cols is None: exclude_cols = []
     
-    # 嚴謹的關鍵字對應表 (按優先級)
+    # 嚴謹的關鍵字對應表 (按優先級，已加入簡體中文兼容)
     keywords_map = {
-        'user': ['username', 'memberaccount', 'account', 'userid', 'uid', '用戶名', '帳號', '玩家', 'user', 'member'],
-        'game': ['lotteryname', 'gamename', '彩種', '遊戲', 'game', '玩法', 'lottery'],
-        'volume': ['validbetamount', 'betamount', '銷量', '投注金額', '打碼量', '有效投注', 'amount', 'bet'],
-        'count': ['betcount', '單數', '筆數', '注數', '下注數', '投注笔数', 'count'],
-        'profit': ['netamount', '盈虧', '盈利', '派彩', 'profit', '客贏', 'net'],
-        'bonus': ['payout', '獎金', '派彩', '中獎金額', 'winamount', 'win', 'prize'],
-        'deposit': ['depositamount', '充值', '存款', '入款', '充值金額', 'deposit'],
-        'fee': ['feeamount', '充值手續費', '手續費', 'fee'],
-        'rebate': ['rebate', '返點', '返水', '退水', '活動'],
-        'dividend': ['dividend', '分紅', '紅利', '派息']
+        'user': ['username', 'memberaccount', 'account', 'userid', 'uid', '用戶名', '用户名', '帳號', '账号', '玩家', 'user', 'member'],
+        'game': ['lotteryname', 'gamename', '彩種', '彩种', '遊戲', '游戏', 'game', '玩法', 'lottery'],
+        'volume': ['validbetamount', 'betamount', '銷量', '销量', '投注金額', '投注金额', '打碼量', '打码量', '有效投注', 'amount', 'bet'],
+        'count': ['betcount', '單數', '单数', '筆數', '笔数', '注數', '注数', '下注數', '下注数', '投注笔数', 'count'],
+        'profit': ['netamount', '盈虧', '盈亏', '盈利', '派彩', 'profit', '客贏', '客赢', 'net'],
+        'bonus': ['payout', '獎金', '奖金', '派彩', '中獎金額', '中奖金额', 'winamount', 'win', 'prize'],
+        'deposit': ['depositamount', '充值', '存款', '入款', '充值金額', '充值金额', 'deposit'],
+        'fee': ['feeamount', '充值手續費', '充值手续费', '手續費', '手续费', 'fee'],
+        'rebate': ['rebate', '返點', '返点', '返水', '退水', '活動', '活动'],
+        'dividend': ['dividend', '分紅', '分红', '紅利', '红利', '派息']
     }
     
     targets = keywords_map.get(category, [])
