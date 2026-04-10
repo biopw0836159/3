@@ -58,36 +58,38 @@ def find_best_column(df, category, exclude_cols=None):
     
     # 嚴謹的關鍵字對應表 (按優先級)
     keywords_map = {
-        'user': ['userName', 'memberAccount', 'account', '用戶名', '帳號', '玩家'],
-        'game': ['lotteryName', 'gameName', '彩種', '遊戲', 'game', '玩法'],
-        'volume': ['validBetAmount', 'betAmount', '銷量', '投注金額', '打碼量', '有效投注'],
-        'count': ['betCount', '單數', '筆數', '注數', '下注數'],
-        'profit': ['netAmount', '盈虧', '盈利', '派彩', 'profit', '客贏'],
-        'bonus': ['payOut', '獎金', '派彩', '中獎金額', 'winAmount'],
-        'deposit': ['depositAmount', '充值', '存款', '入款', '充值金額'],
-        'fee': ['feeAmount', '充值手續費', '手續費'],
+        'user': ['username', 'memberaccount', 'account', 'userid', 'uid', '用戶名', '帳號', '玩家', 'user', 'member'],
+        'game': ['lotteryname', 'gamename', '彩種', '遊戲', 'game', '玩法', 'lottery'],
+        'volume': ['validbetamount', 'betamount', '銷量', '投注金額', '打碼量', '有效投注', 'amount', 'bet'],
+        'count': ['betcount', '單數', '筆數', '注數', '下注數', 'count'],
+        'profit': ['netamount', '盈虧', '盈利', '派彩', 'profit', '客贏', 'net'],
+        'bonus': ['payout', '獎金', '派彩', '中獎金額', 'winamount', 'win', 'prize'],
+        'deposit': ['depositamount', '充值', '存款', '入款', '充值金額', 'deposit'],
+        'fee': ['feeamount', '充值手續費', '手續費', 'fee'],
         'rebate': ['rebate', '返點', '返水', '退水', '活動'],
         'dividend': ['dividend', '分紅', '紅利', '派息']
     }
     
     targets = keywords_map.get(category, [])
+    available_cols = [c for c in df.columns if c not in exclude_cols]
     
-    # 第一階段：完全精確匹配 (忽略大小寫)
+    # 預處理欄位名稱：全小寫、去除底線、去除空白，大幅增加匹配容錯率
+    col_norm_map = {c: str(c).lower().replace('_', '').replace(' ', '') for c in available_cols}
+    
+    # 第一階段：完全精確匹配 (忽略大小寫與底線)
     for t in targets:
-        for col in df.columns:
-            if col in exclude_cols: continue
-            if str(col).lower() == t.lower(): return col
+        for col in available_cols:
+            if col_norm_map[col] == t: return col
             
     # 第二階段：包含關鍵字 (防呆)
     for t in targets:
-        for col in df.columns:
-            if col in exclude_cols: continue
-            col_str = str(col).lower()
-            if t.lower() in col_str:
-                # 嚴格防止 user 抓到 game, id 或時間欄位
-                if category == 'user' and any(k in col_str for k in ['game', 'lottery', 'id', 'time', 'date']): continue
+        for col in available_cols:
+            col_norm = col_norm_map[col]
+            if t in col_norm:
+                # 嚴格防止 user 抓到 game 或時間欄位 (已解禁 id 限制，防誤傷 userid)
+                if category == 'user' and any(k in col_norm for k in ['game', 'lottery', 'time', 'date', 'ip']): continue
                 # 防止 game 抓到 user 欄位
-                if category == 'game' and any(k in col_str for k in ['user', 'account', 'member']): continue
+                if category == 'game' and any(k in col_norm for k in ['user', 'account', 'member']): continue
                 return col
                 
     return None
@@ -96,13 +98,13 @@ def find_best_column(df, category, exclude_cols=None):
 def is_valid_user(username):
     u = str(username).strip()
     # 排除空值或系統預設詞
-    if not u or u.lower() in ['nan', 'none', 'null', '總計', '合计', 'total', '0']: return False
+    if not u or u.lower() in ['nan', 'none', 'null', '總計', '合计', 'total', '0', 'undefined']: return False
     
-    # 排除純數字且長度過短 (很可能是 ID 而非帳號)
+    # 排除純數字且長度過短 (<= 5 表示很可能是 ID 代碼而非帳號)
     if u.isdigit() and len(u) <= 5: return False 
     
     # 排除包含彩種關鍵字的字串
-    game_keywords = ['彩', '飛艇', '賽車', '百家樂', '龍虎', '輪盤', '快3', '快三', '11選5', 'pk10', '六合', '特碼', '真人', '體育', '電競', '分分', '秒秒', '遊戲']
+    game_keywords = ['彩', '飛艇', '賽車', '百家樂', '龍虎', '輪盤', '快3', '快三', '11選5', 'pk10', '六合', '特碼', '真人', '體育', '電競', '分分', '秒秒', '遊戲', '測試', 'test']
     if any(k in u for k in game_keywords): return False
     
     return True
@@ -111,7 +113,11 @@ def is_valid_user(username):
 def to_n(df, col_name):
     if not col_name or col_name not in df.columns: return 0
     # 利用正則 [^\d\.\-] 替換掉所有非數字、小數點和負號的字符，確保不會因為逗號($/¥)轉換失敗
-    return pd.to_numeric(df[col_name].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce').fillna(0)
+    s = df[col_name].fillna('0').astype(str)
+    s = s.str.replace(r'[^\d\.\-]', '', regex=True)
+    s = s.replace(r'^[.\-]*$', '0', regex=True) # 處理空字串或純符號
+    s = s.replace('', '0')
+    return pd.to_numeric(s, errors='coerce').fillna(0)
 
 # --- 核心數據獲取模組 (API) ---
 @st.cache_data(show_spinner=False, ttl=300)
@@ -138,7 +144,7 @@ def fetch_api_data(endpoint, d_start, d_end):
 def run_audit_engine(df, rules):
     try:
         user_col = find_best_column(df, 'user')
-        if not user_col: return None, "無法於資料源中辨識到合法的『用戶名』欄位"
+        if not user_col: return None, f"無法辨識『用戶名』欄位。當前可用欄位: {list(df.columns)}"
         
         game_col = find_best_column(df, 'game', [user_col])
         vol_col = find_best_column(df, 'volume', [user_col, game_col])
@@ -193,7 +199,7 @@ def run_audit_engine(df, rules):
 def run_strict_audit(df, cfg):
     try:
         user_col = find_best_column(df, 'user')
-        if not user_col: return None, "無法於資料源中辨識到合法的『用戶名』欄位"
+        if not user_col: return None, f"無法辨識『用戶名』欄位。當前可用欄位: {list(df.columns)}"
         
         fee_col = find_best_column(df, 'deposit', [user_col])
         win_col = find_best_column(df, 'volume', [user_col, fee_col])
