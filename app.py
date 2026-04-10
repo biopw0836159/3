@@ -61,7 +61,7 @@ def find_best_column(df, category, exclude_cols=None):
         'user': ['username', 'memberaccount', 'account', 'userid', 'uid', '用戶名', '帳號', '玩家', 'user', 'member'],
         'game': ['lotteryname', 'gamename', '彩種', '遊戲', 'game', '玩法', 'lottery'],
         'volume': ['validbetamount', 'betamount', '銷量', '投注金額', '打碼量', '有效投注', 'amount', 'bet'],
-        'count': ['betcount', '單數', '筆數', '注數', '下注數', 'count'],
+        'count': ['betcount', '單數', '筆數', '注數', '下注數', '投注笔数', 'count'],
         'profit': ['netamount', '盈虧', '盈利', '派彩', 'profit', '客贏', 'net'],
         'bonus': ['payout', '獎金', '派彩', '中獎金額', 'winamount', 'win', 'prize'],
         'deposit': ['depositamount', '充值', '存款', '入款', '充值金額', 'deposit'],
@@ -140,32 +140,43 @@ def fetch_api_data(endpoint, d_start, d_end):
         st.error(f"❌ 數據獲取異常: {e}")
         return None
 
-# --- 核心引擎 A (用戶彩票分析) ---
+# --- 核心引擎 A (智能切換：用戶分析 / 彩種分析) ---
 def run_audit_engine(df, rules):
     try:
         user_col = find_best_column(df, 'user')
-        if not user_col: return None, f"無法辨識『用戶名』欄位。當前可用欄位: {list(df.columns)}"
+        game_col = find_best_column(df, 'game', [user_col] if user_col else [])
         
-        game_col = find_best_column(df, 'game', [user_col])
-        vol_col = find_best_column(df, 'volume', [user_col, game_col])
-        cnt_col = find_best_column(df, 'count', [user_col, game_col, vol_col])
-        profit_col = find_best_column(df, 'profit', [user_col, game_col, vol_col, cnt_col])
-        bonus_col = find_best_column(df, 'bonus', [user_col, game_col, vol_col, cnt_col, profit_col])
+        target_type = "user"
+        target_col = user_col
+        
+        # 💡 動態降級機制：如果找不到用戶名，但有彩種名稱，則切換為彩種風控分析
+        if not user_col:
+            if game_col:
+                target_type = "game"
+                target_col = game_col
+            else:
+                return None, f"無法辨識『用戶名』或『彩種』欄位。當前可用欄位: {list(df.columns)}", None
+        
+        vol_col = find_best_column(df, 'volume', [target_col, game_col])
+        cnt_col = find_best_column(df, 'count', [target_col, game_col, vol_col])
+        profit_col = find_best_column(df, 'profit', [target_col, game_col, vol_col, cnt_col])
+        bonus_col = find_best_column(df, 'bonus', [target_col, game_col, vol_col, cnt_col, profit_col])
 
         temp = pd.DataFrame()
-        temp['用戶名'] = df[user_col].astype(str).str.strip()
+        temp['分析對象'] = df[target_col].astype(str).str.strip()
         temp['銷量'] = to_n(df, vol_col)
         temp['單數'] = to_n(df, cnt_col)
         temp['盈虧'] = to_n(df, profit_col)
         temp['獎金'] = to_n(df, bonus_col)
 
-        # ✨ 關鍵攔截：清洗過濾掉純短數字和彩種名
-        temp = temp[temp['用戶名'].apply(is_valid_user)]
-        if temp.empty: return None, "過濾後無有效數據 (可能原資料無合法用戶名)"
+        # ✨ 關鍵攔截：若分析對象是會員，清洗過濾掉純短數字和彩種名
+        if target_type == 'user':
+            temp = temp[temp['分析對象'].apply(is_valid_user)]
+            if temp.empty: return None, "過濾後無有效會員數據 (可能原資料無合法用戶名)", target_type
 
         # 聚合計算
         agg_dict = {'銷量':'sum', '單數':'sum', '盈虧':'sum', '獎金':'sum'}
-        grouped = temp.groupby('用戶名').agg(agg_dict).reset_index()
+        grouped = temp.groupby('分析對象').agg(agg_dict).reset_index()
         grouped['RTP'] = grouped.apply(lambda x: x['獎金'] / x['銷量'] if x['銷量'] > 0 else 0, axis=1)
         
         def check(row):
@@ -179,21 +190,32 @@ def run_audit_engine(df, rules):
                 return "手動篩選" if m else None
             
             res_tags = []
-            if 1000 <= v <= 2000 and c <= 12: res_tags.append("疑似刷人數")
-            if v > 2000 and c <= 10: res_tags.append("疑似對刷")
-            if v >= 500000 and 0.995 <= r <= 1.000: res_tags.append("疑似刷量")
-            if p >= 100000: res_tags.append("盈利大會員")
+            
+            if target_type == 'user':
+                # 會員專屬風控規則
+                if 1000 <= v <= 2000 and c <= 12: res_tags.append("疑似刷人數")
+                if v > 2000 and c <= 10: res_tags.append("疑似對刷")
+                if v >= 500000 and 0.995 <= r <= 1.000: res_tags.append("疑似刷量")
+                if p >= 100000: res_tags.append("盈利大會員")
+            else:
+                # 彩種專屬風控規則
+                if v >= 500000 and r >= 1.000: res_tags.append("高RTP殺數異常")
+                if c >= 2000 and p <= -50000: res_tags.append("莊家高虧損")
+                if v >= 1000000 and 0.98 <= r <= 1.02: res_tags.append("流水池可疑")
+                if p >= 100000: res_tags.append("高獲利彩種")
+
             return " | ".join(res_tags) if res_tags else None
 
         grouped['原因'] = grouped.apply(check, axis=1)
         
         debug_info = {
-            "用戶欄位映射": user_col, "遊戲欄位映射": game_col, "銷量欄位映射": vol_col,
+            "解析模式": "會員明細分析" if target_type == 'user' else "彩種彙總分析",
+            "目標欄位映射": target_col, "遊戲欄位映射": game_col, "銷量欄位映射": vol_col,
             "單數欄位映射": cnt_col, "盈虧欄位映射": profit_col, "獎金欄位映射": bonus_col
         }
-        return grouped[grouped['原因'].notna()].copy(), debug_info
+        return grouped[grouped['原因'].notna()].copy(), debug_info, target_type
     except Exception as e:
-        return None, f"引擎 A 解析異常: {e}"
+        return None, f"引擎 A 解析異常: {e}", None
 
 # --- 核心引擎 B (盈虧排行) ---
 def run_strict_audit(df, cfg):
@@ -269,25 +291,29 @@ if mode == "用戶彩票分析":
     raw_a = fetch_api_data("https://stats-crawler.up.railway.app/api/open/lottery-analysis", ds, de)
     if exec_a and raw_a is not None and not raw_a.empty:
         rules = {'use_manual':use_manual, 'v_on':v_on, 'v_min':v_min, 'v_max':v_max, 'c_on':c_on, 'c_limit':c_limit, 'p_on':p_on, 'p_min':p_min, 'p_max':p_max, 'r_on':r_on, 'r_min':r_min, 'r_max':r_max}
-        res, info = run_audit_engine(raw_a, rules)
+        res, info, target_type = run_audit_engine(raw_a, rules)
         
         if res is not None:
             with st.expander("🛠️ 程式驗證與欄位映射 (嚴謹模式)", expanded=False):
                 st.json(info)
                 
+            if target_type == 'game':
+                st.warning("⚠️ **數據源通知**：當前 API 來源僅包含『彩種彙總』，缺乏會員明細。系統已自動啟動備援策略，切換為 **【彩種異常風控分析】**。")
+                
             if not res.empty:
                 st.markdown("### 🚨 異常捕獲實況")
-                st.markdown("""<div class='table-header'><div style='flex:1.5'>用戶名</div><div style='flex:2.5'>異常原因</div><div style='flex:1.2'>銷量</div><div style='flex:1.0'>單數</div><div style='flex:1.2'>盈虧</div><div style='flex:1.0'>RTP</div></div>""", unsafe_allow_html=True)
+                col_name = "用戶名" if target_type == 'user' else "異常彩種"
+                st.markdown(f"""<div class='table-header'><div style='flex:1.5'>{col_name}</div><div style='flex:2.5'>異常原因</div><div style='flex:1.2'>銷量</div><div style='flex:1.0'>單數</div><div style='flex:1.2'>盈虧</div><div style='flex:1.0'>RTP</div></div>""", unsafe_allow_html=True)
                 for _, row in res.iterrows():
                     cols = st.columns([1.5, 2.5, 1.2, 1.0, 1.2, 1.0])
-                    cols[0].write(row['用戶名'])
+                    cols[0].write(row['分析對象'])
                     cols[1].markdown(f"<span class='badge-red'>{row['原因']}</span>", unsafe_allow_html=True)
                     cols[2].write(f"{row['銷量']:,.0f}")
                     cols[3].write(int(row['單數']))
                     cols[4].write(f"{row['盈虧']:,.0f}")
                     cols[5].write(f"{row['RTP']:.3f}")
                     st.divider()
-            else: st.success("✅ 掃描完畢，真實有效用戶中未發現異常。")
+            else: st.success("✅ 掃描完畢，未發現異常。")
         else:
             st.error(f"❌ 解析失敗: {info}")
     elif exec_a:
