@@ -64,7 +64,7 @@ if not st.session_state.auth:
             else: st.error("❌ 密码错误")
     st.stop()
 
-# --- API 獲取引擎 (導入真實 Chrome 116 瀏覽器 TLS 偽裝) ---
+# --- API 獲取引擎 ---
 def fetch_api_data(url, dt_start, dt_end, platform):
     API_KEY = "sk-d79a713caf53e8bdh3154a596ca1a0166234df7"
     
@@ -91,16 +91,13 @@ def fetch_api_data(url, dt_start, dt_end, platform):
     
     try:
         if HAS_CFFI:
-            # 這是突破 AWS WAF 的核心：直接模擬 Chrome 116 的底層特徵
             session = cffi_requests.Session(impersonate="chrome116")
         else:
-            # 如果沒安裝，退回會被擋的舊方法
             session = requests.Session()
             headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             
         response = session.get(url, headers=headers, params=params, timeout=30)
         
-        # 嚴謹偵測初階 CC 防護 (setTimeout 800ms 跳轉)
         if response.status_code == 200 and "location.href=" in response.text and "_r=" in response.text and "setTimeout" in response.text:
             time.sleep(0.9) 
             parsed_url = urlparse(url)
@@ -111,31 +108,21 @@ def fetch_api_data(url, dt_start, dt_end, platform):
             session.get(bypass_url, headers=headers, timeout=15)
             response = session.get(url, headers=headers, params=params, timeout=45)
 
-        # 錯誤狀態碼攔截
         if not response.ok:
             st.error(f"⚠️ API 請求失敗 (狀態碼 {response.status_code})")
             return None
             
-        # 嚴謹偵測高階 AWS WAF 防護 (如果偽裝失敗，或者沒裝 curl_cffi)
         if "awsWafCookieDomainList" in response.text or "challenge.js" in response.text:
             st.error("🛑 嚴重系統警告：遭到目標網站 AWS WAF 防火牆攔截")
-            st.warning("💡 診斷結論：您的請求指紋被 AWS 識破了。請確認您已正確安裝並啟用 `curl_cffi` 套件來進行瀏覽器偽裝。")
-            with st.expander("🔍 點擊查看防火牆攔截特徵"):
-                st.text("特徵字眼包含: awsWafCookieDomainList, challenge.js")
             return None
             
-        # 其他未知的 HTML 頁面阻擋
         if response.text.strip().startswith('<!DOCTYPE') or '<html' in response.text.lower():
             st.error("❌ 伺服器防護極為嚴格，請求被徹底攔截 (非 JSON 數據)。")
-            with st.expander("🔍 點擊查看伺服器實際回傳內容"):
-                st.text(response.text[:2000])
             return None
             
-        # 空字串處理
         if not response.text or not response.text.strip():
             return pd.DataFrame()
             
-        # 嘗試解析 JSON
         try:
             data = response.json()
         except ValueError: 
@@ -150,74 +137,110 @@ def fetch_api_data(url, dt_start, dt_end, platform):
         st.error(f"⚠️ 系統發生網路連線或未預期錯誤: {e}")
         return None
 
-# --- 精準獲取平台欄位 ---
+# --- 精準獲取平台欄位 (升級版：增強內容盲猜特徵) ---
 def get_platform_col(df):
-    exact_cols = ['platform', 'site', '平台', 'sitecode', 'site_code']
-    lower_cols = {str(c).strip().lower(): c for c in df.columns}
-    for col in exact_cols:
-        if col in lower_cols: return lower_cols[col]
-    for c in df.columns:
-        if any(a in str(c).lower().strip() for a in ['平台', 'platform', 'site']): return c
-    return None
-
-# --- 絕對嚴謹的帳號欄位提取引擎 (V4: 強制排除彩種與無效數字) ---
-def get_exact_user_col(df):
-    """
-    結合欄位名稱與實際資料內容進行極度嚴格的雙重驗證。
-    保證只拿真正的用戶名，絕對不要「台灣PK10」或「123」。
-    """
-    exact_user_cols = ['username', 'account', '用户名', '用戶名', '账号', '帳號', '会员账号', 'member', 'loginname', 'membername', 'user_name', 'user_account']
+    exact_cols = ['platform', 'site', '平台', 'sitecode', 'site_code', 'merchant', 'merchantcode', 'merchant_code', 'site_id', 'siteid', 'pt']
     lower_cols = {str(c).strip().lower(): c for c in df.columns}
     
-    # 1. 絕對精準名稱直擊 (若 API 乖乖用標準名稱，直接命中)
+    # 1. 欄位名稱精準命中
+    for col in exact_cols:
+        if col in lower_cols: return lower_cols[col]
+        
+    # 2. 欄位名稱模糊命中
+    for c in df.columns:
+        if any(a in str(c).lower().strip() for a in ['平台', 'platform', 'site', 'merchant']): return c
+        
+    # 3. 嚴謹模式：資料內容特徵盲猜 (捕捉 ND, JY, FB 等大寫平台代碼)
+    for c in df.columns:
+        sample = df[c].dropna().astype(str).head(20)
+        # 若為 2~5 碼全大寫字母，極高機率為平台代號
+        if not sample.empty and all(val.isalpha() and val.isupper() and 2 <= len(val) <= 5 for val in sample):
+            return c
+            
+    return None
+
+# --- 絕對嚴謹的帳號欄位提取引擎 (V5: 全新內容特徵過濾與防誤殺機制) ---
+def get_exact_user_col(df):
+    exact_user_cols = [
+        'username', 'account', '用户名', '用戶名', '账号', '帳號', '会员账号', 
+        'member', 'loginname', 'membername', 'user_name', 'user_account', 
+        'userid', 'user_id', 'uid', 'memberid', 'member_id', 'accountname', 
+        '玩家', '玩家账号', 'player'
+    ]
+    lower_cols = {str(c).strip().lower(): c for c in df.columns}
+    
+    # 1. 直接命中標準欄位名稱
     for col in exact_user_cols:
         if col in lower_cols:
             return lower_cols[col]
             
-    # 2. 禁忌關鍵字：只要欄位名稱包含這些，直接秒殺排除
-    forbidden_col_names = ['彩', '游戏', 'game', 'lottery', '平台', 'site', 'time', 'date', '期号', '订单', 'id', '单号', '金额', '盈亏', '状态', '名称']
+    # 2. 禁忌關鍵字：直接秒殺無效欄位 (移除 'id' 避免誤殺 user_id)
+    forbidden_col_names = ['彩', '游戏', 'game', 'lottery', '平台', 'site', 'time', 'date', '期号', '订单', '单号', '金额', '盈亏', '状态', 'pt', 'merchant']
     
-    # 擴充：彩種與無效數據特徵庫 (包含台灣、奇趣等常誤判字眼)
-    game_keywords = ['pk10', '分分彩', '时时彩', '快3', '快三', '六合彩', '赛车', '飞艇', '百家乐', '体育', '电竞', '彩票', '真人', '龙虎', '三分', '五分', '秒速', '奇趣', '台湾', '澳洲', '极速']
+    # 3. 擴充：彩種與無效數據特徵庫 (嚴防將彩種當作帳號)
+    game_keywords = [
+        'pk10', '分分彩', '时时彩', '快3', '快三', '六合彩', '赛车', '飞艇', '百家乐', 
+        '体育', '电竞', '彩票', '真人', '龙虎', '三分', '五分', '秒速', '奇趣', '台湾', 
+        '澳洲', '极速', '哈希', '以太坊', '腾讯', '幸运', '北京', '加拿大'
+    ]
     
-    best_candidate = None
+    valid_candidates = []
     
+    # 建立第一波候選名單
     for c in df.columns:
         c_str = str(c).lower().strip()
         
-        # 欄位名稱包含禁忌字直接跳過
-        if any(f in c_str for f in forbidden_col_names): continue
+        # A. 欄位名稱防護
+        if any(f in c_str for f in forbidden_col_names): 
+            continue
             
         sample = df[c].dropna().astype(str).head(20)
-        if sample.empty: continue
+        if sample.empty: 
+            continue
         
-        # 嚴格審查 A：只要樣本中出現任何一個彩種特徵字，此欄位連同資料全部判定為無效
+        # B. 內容防護：只要出現任何一個彩種特徵字，此欄位連同資料全部判定為無效
         is_game_col = False
         for val in sample:
             if any(gk in val.lower() for gk in game_keywords):
                 is_game_col = True
                 break
-        if is_game_col: continue
+        if is_game_col: 
+            continue
             
-        # 嚴格審查 B：絕對封殺「流水號」與「短ID」
-        # 若所有樣本字串都是純數字，且平均長度小於 6 碼 (帳號很少小於6碼純數字)，直接排除
+        # C. 長度防護：純數字且平均長度過短或過長，排除 (避開金額與長訂單號)
         if all(val.isdigit() for val in sample):
             avg_num_len = sum(len(val) for val in sample) / len(sample)
-            if avg_num_len < 6:
+            if avg_num_len < 4 or avg_num_len > 16:
                 continue
                 
-        # 若通過上述極端測試，且名稱包含以下字根，即認定為帳號
-        if any(k in c_str for k in ['user', 'account', '会员', '帐', '帳', '名']):
+        valid_candidates.append(c)
+
+    # 4. 在合格候選名單中尋找最佳解
+    # 優先找名稱中包含暗示帳號字根的
+    for c in valid_candidates:
+        c_str = str(c).lower().strip()
+        if any(k in c_str for k in ['user', 'account', '会员', '帐', '帳', '名', 'uid', 'id', 'player']):
             return c
             
-        # 最嚴格的盲猜備案：必須是字串型態，平均長度在 5~25 之間，且不全為純數字短碼
-        if best_candidate is None and sample.dtype == object:
-            avg_len = sum(len(val) for val in sample) / len(sample)
-            if 5 <= avg_len <= 25 and not all(val.isdigit() and len(val)<6 for val in sample): 
-                best_candidate = c
+    # 5. 若無提示，進行資料特徵盲猜：帳號通常是英數混合
+    for c in valid_candidates:
+        sample = df[c].dropna().astype(str).head(20)
+        is_alphanumeric = any(any(char.isalpha() for char in val) and any(char.isdigit() for char in val) for val in sample)
+        if is_alphanumeric:
+            return c
+            
+    # 6. 安全回退：如果候選名單不為空，取第一個
+    if valid_candidates:
+        return valid_candidates[0]
+        
+    # 7. 極端情況：所有的欄位都被過濾掉了 (比如名稱太詭異)。最後防線，至少過濾掉彩種。
+    for c in df.columns:
+        sample = df[c].dropna().astype(str).head(10)
+        if not any(any(gk in val.lower() for gk in game_keywords) for val in sample):
+            return c
 
-    # 如果真的一無所獲，回傳第一欄位作為不得已的預設
-    return best_candidate if best_candidate else df.columns[0]
+    # 若以上全部失敗，才回傳第一欄
+    return df.columns[0]
 
 # --- 核心引擎 A ---
 def run_audit_engine(df, rules):
