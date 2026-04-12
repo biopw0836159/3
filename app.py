@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import datetime
+import time
 
 # 1. 页面配置
 st.set_page_config(page_title="抓鬼专家", layout="wide")
@@ -50,12 +51,11 @@ if not st.session_state.auth:
             else: st.error("❌ 密码错误")
     st.stop()
 
-# --- API 獲取引擎 (加入強健的防呆機制與反爬蟲偽裝) ---
+# --- API 獲取引擎 (加入強健的 WAF 繞過機制) ---
 def fetch_api_data(url, dt_start, dt_end, platform):
     """通用 API 數據獲取函式"""
     API_KEY = "sk-d79a713caf53e8bdh3154a596ca1a0166234df7"
     
-    # 加入 User-Agent 偽裝成 Chrome 瀏覽器，避免被 WAF (如 Cloudflare) 阻擋並回傳 JS 驗證頁面
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "X-API-Key": API_KEY,
@@ -75,28 +75,49 @@ def fetch_api_data(url, dt_start, dt_end, platform):
         "key": API_KEY 
     }
     
+    # 創建 Session 以保持 Cookie，破解防爬蟲跳轉
+    session = requests.Session()
+    
     try:
-        response = requests.get(url, headers=headers, params=params, timeout=60)
+        response = session.get(url, headers=headers, params=params, timeout=60)
         
-        # 1. 如果伺服器明確回傳錯誤狀態碼 (如 404, 500, 502, 403)
+        # 【核心修復】：偵測到 WAF 驗證的 JavaScript 跳轉代碼
+        if response.status_code == 200 and "location.href=" in response.text and "Date.now()" in response.text:
+            # 擷取基礎網址
+            base_url = url.split("/api/")[0]
+            # 模擬 JS 中的 Date.now()
+            timestamp = int(time.time() * 1000)
+            bypass_url = f"{base_url}/?_r={timestamp}"
+            
+            # 1. 訪問跳轉網址以獲取驗證通過的 Cookie
+            session.get(bypass_url, headers=headers, timeout=15)
+            
+            # 2. 攜帶有效 Cookie 重新發起真正的 API 請求
+            response = session.get(url, headers=headers, params=params, timeout=60)
+
+        # 1. 如果伺服器明確回傳錯誤狀態碼
         if not response.ok:
             st.error(f"⚠️ API 請求失敗 (狀態碼 {response.status_code})")
             with st.expander("🔍 點擊查看伺服器拒絕詳情"):
                 st.text(response.text[:2000] if response.text else "無回傳內容")
             return None
             
-        # 2. 新增防呆：處理 HTTP 200 但伺服器回傳為空的狀況 (視為查無資料)
+        # 2. 若經過繞過後，依然回傳 HTML，則代表被徹底阻擋
+        if response.text.strip().startswith('<!DOCTYPE') or '<html' in response.text.lower():
+            st.error("❌ 伺服器防護極為嚴格，已阻擋自動化請求。無法獲取數據。")
+            with st.expander("🔍 點擊查看伺服器實際回傳內容"):
+                st.text(response.text[:2000])
+            return None
+            
+        # 3. 處理空字串 (查無資料)
         if not response.text or not response.text.strip():
             return pd.DataFrame()
             
-        # 3. 攔截 JSON 解析錯誤 (防止回傳 HTML 導致崩潰)
+        # 4. 解析 JSON
         try:
             data = response.json()
-        except ValueError: # 捕捉 JSONDecodeError
-            st.error("❌ 伺服器回傳了無效的資料格式！(API 可能異常、當機或遭遇更強的反爬蟲機制)")
-            st.warning("請展開下方訊息，確認伺服器到底回傳了什麼內容。")
-            with st.expander("🔍 點擊查看伺服器實際回傳內容"):
-                st.text(response.text[:2000] if response.text else "（伺服器回傳為空）")
+        except ValueError: 
+            st.error("❌ 伺服器回傳了無效的資料格式！")
             return None
         
         if isinstance(data, dict) and 'data' in data:
@@ -132,9 +153,9 @@ def get_platform_col(df):
             
     return None
 
-# --- 優化：精準獲取帳號欄位 (防範抓到彩種) ---
+# --- 優化：精準獲取帳號欄位 (防範抓到彩种) ---
 def get_exact_user_col(df):
-    """精準抓取 API 端口帳號名稱，強制避免將彩種名誤判為帳號"""
+    """精準抓取 API 端口帳號名稱，強制避免將彩种名誤判為帳號"""
     exact_user_cols = ['username', 'account', '用户名', '用戶名', '账号', '帳號', '会员账号', 'member', 'loginname', 'membername']
     lower_cols = {str(c).strip().lower(): c for c in df.columns}
     
@@ -346,8 +367,8 @@ with st.sidebar:
     platform_options = ["", "YD", "ND", "JD", "SY", "MT", "LY", "FB", "XY", "XO", "OL", "LS", "HS", "JY", "SH", "XH"]
     api_platform = st.selectbox("🏢 目標平台", options=platform_options, format_func=lambda x: "全平台 (查詢所有平台)" if x == "" else x)
     
-    # 【關鍵修復點】：若選擇全平台，直接發送空字串，不要強行拼接所有代碼造成伺服器解析失敗回傳空值
-    actual_request_platform = api_platform 
+    # 【還原您的原始設計】：後端可能需要接收完整的平台字串代碼才會回傳正確資料
+    actual_request_platform = api_platform if api_platform != "" else ",".join([p for p in platform_options if p != ""])
     
     fetch_clicked = st.button("🔄 獲取 API 數據", type="primary", use_container_width=True)
     
