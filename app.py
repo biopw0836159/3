@@ -68,7 +68,7 @@ def fetch_api_data(url, dt_start, dt_end, platform):
     params = {
         "dateStart": start_str,
         "dateEnd": end_str,
-        "platform": platform, # 直接帶入組裝好的多平台字串，滿足 API 必填條件
+        "platform": platform, 
         "apiKey": API_KEY, 
         "key": API_KEY 
     }
@@ -95,33 +95,64 @@ def fetch_api_data(url, dt_start, dt_end, platform):
         st.error(f"API 請求發生未預期的錯誤！詳細錯誤: {e}")
         return None
 
-# --- 通用：精準獲取帳號欄位 ---
-def get_exact_user_col(df):
-    """精準抓取 API 端口帳號名稱，優先比對常見標準欄位"""
-    exact_user_cols = ['userName', 'username', 'account', '用户名', '用戶名', '账号', '帳號', '会员账号', 'Member']
-    lower_cols = {str(c).lower(): c for c in df.columns}
+# --- 新增：精準獲取平台欄位 ---
+def get_platform_col(df):
+    """精準抓取 API 端口的平台欄位"""
+    exact_cols = ['platform', 'site', '平台', 'sitecode', 'site_code']
+    lower_cols = {str(c).strip().lower(): c for c in df.columns}
     
-    # 1. 優先進行精準比對 (忽略大小寫)
+    # 1. 優先精準比對
+    for col in exact_cols:
+        if col in lower_cols:
+            return lower_cols[col]
+            
+    # 2. 模糊比對
+    for c in df.columns:
+        c_str = str(c).lower().strip()
+        if any(a in c_str for a in ['平台', 'platform', 'site']):
+            return c
+            
+    return None
+
+# --- 優化：精準獲取帳號欄位 (防範抓到彩種) ---
+def get_exact_user_col(df):
+    """精準抓取 API 端口帳號名稱，強制避免將彩種名誤判為帳號"""
+    exact_user_cols = ['username', 'account', '用户名', '用戶名', '账号', '帳號', '会员账号', 'member', 'loginname', 'membername']
+    # 建立映射表，清除欄位前後可能存在的隱藏空白字元
+    lower_cols = {str(c).strip().lower(): c for c in df.columns}
+    
+    # 1. 優先進行精準比對
     for col in exact_user_cols:
-        if col.lower() in lower_cols:
-            return lower_cols[col.lower()]
+        if col in lower_cols:
+            return lower_cols[col]
+            
+    # 定義絕對不能判定為帳號的禁忌字眼
+    forbidden_keywords = ['彩种', '游戏', 'game', 'lottery', '平台', 'platform', 'site', 'time', 'date', '时间', '日期']
             
     # 2. 降級：如果沒找到，則進行原本的模糊過濾
-    user_aliases = ['账号', '帳號', '用户名', '用戶名', '会员', 'user', 'account']
-    user_candidates = [c for c in df.columns if any(a in str(c).lower() for a in user_aliases)]
+    user_aliases = ['账号', '帳號', '用户名', '用戶名', '会员', 'user', 'account', 'member']
     
-    valid_user_col = None
-    for c in user_candidates:
-        if any(forbidden in str(c).lower() for forbidden in ['彩种', '游戏', 'game', 'lottery']):
+    for c in df.columns:
+        c_str = str(c).lower().strip()
+        # 若包含禁忌字眼，直接跳過，絕不視為帳號欄位
+        if any(f in c_str for f in forbidden_keywords):
+            continue
+        # 若包含帳號關鍵字，則認定為帳號欄位
+        if any(a in c_str for a in user_aliases):
+            return c
+            
+    # 3. 終極盲猜：排除禁忌字眼後，尋找內容像帳號的欄位
+    for c in df.columns:
+        c_str = str(c).lower().strip()
+        if any(f in c_str for f in forbidden_keywords):
             continue
         sample = df[c].dropna().astype(str).head(10)
         if sample.empty: continue
-        short_digits_count = sum(1 for x in sample if x.isdigit() and len(x) < 5)
-        if short_digits_count < len(sample) * 0.5:
-            valid_user_col = c
-            break
+        # 簡單驗證：長度正常，且非純數值(或純數值但不像統計數據)
+        if all(len(x) >= 3 for x in sample):
+            return c
             
-    return valid_user_col if valid_user_col else (user_candidates[0] if user_candidates else df.columns[0])
+    return df.columns[0] # 最後手段
 
 # --- 核心引擎 A ---
 def run_audit_engine(df, rules):
@@ -130,6 +161,7 @@ def run_audit_engine(df, rules):
         df.columns = [str(c).strip() for c in df.columns]
         
         final_user_col = get_exact_user_col(df)
+        platform_col = get_platform_col(df)
 
         mapping = {
             'vol': ['销量', '投注', 'betAmount', 'amount', '打码'],
@@ -148,6 +180,8 @@ def run_audit_engine(df, rules):
 
         temp_df = pd.DataFrame()
         temp_df['用户名'] = df[final_cols['user']].astype(str)
+        temp_df['平台'] = df[platform_col].astype(str) if platform_col else "-" # 寫入平台資料
+        
         temp_df['销量'] = pd.to_numeric(df[final_cols.get('vol', df.columns[1])].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         temp_df['单数'] = pd.to_numeric(df[final_cols.get('cnt', df.columns[2])].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         temp_df['盈亏'] = pd.to_numeric(df[final_cols.get('profit', df.columns[-1])].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
@@ -157,6 +191,8 @@ def run_audit_engine(df, rules):
             temp_df['彩种'] = df[game_cols[0]].astype(str)
 
         agg_dict = {'销量':'sum', '单数':'sum', '盈亏':'sum', '奖金':'sum'}
+        agg_dict['平台'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']])))) # 聚合平台
+        
         if has_game:
             agg_dict['彩种'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
 
@@ -195,6 +231,7 @@ def run_strict_audit(df, cfg):
         df.columns = [str(c).strip() for c in df.columns]
         
         final_user_col = get_exact_user_col(df)
+        platform_col = get_platform_col(df)
 
         profit_col = None
         for c in df.columns:
@@ -208,6 +245,7 @@ def run_strict_audit(df, cfg):
 
         clean_df = pd.DataFrame()
         clean_df['用户名'] = df[final_user_col].astype(str)
+        clean_df['平台'] = df[platform_col].astype(str) if platform_col else "-" # 寫入平台資料
         
         target_mappings = {
             '个人充值手续费': ['充值', 'recharge', 'fee', '个人充值手续费'],
@@ -231,6 +269,8 @@ def run_strict_audit(df, cfg):
             clean_df['彩种'] = df[game_cols[0]].astype(str)
 
         agg_dict = {'个人充值手续费':'sum','个人派奖':'sum','个人自身返点/返水':'sum','个人系统分红':'sum','盈亏':'sum'}
+        agg_dict['平台'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']])))) # 聚合平台
+        
         if has_game:
             agg_dict['彩种'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
 
@@ -286,13 +326,9 @@ with st.sidebar:
     dt_start = datetime.datetime.combine(api_date_start, api_time_start)
     dt_end = datetime.datetime.combine(api_date_end, api_time_end)
     
-    # 平台清單設定 (依據需求嚴格寫死主平台，排除外接彩種)
     platform_options = ["", "YD", "ND", "JD", "SY", "MT", "LY", "FB", "XY", "XO", "OL", "LS", "HS", "JY", "SH", "XH"]
     api_platform = st.selectbox("🏢 目標平台", options=platform_options, format_func=lambda x: "全平台 (查詢所有平台)" if x == "" else x)
     
-    # 【核心解法】
-    # 如果使用者選擇的是空白(全平台)，我們自動把清單裡除了空白以外的平台用逗號連接起來
-    # 變成 "XO,XO2,AG,PG,CQ9,JDB,BBIN,KY,SBO" 發送給 API，滿足其不可空值的限制。
     actual_request_platform = api_platform if api_platform != "" else ",".join([p for p in platform_options if p != ""])
     
     fetch_clicked = st.button("🔄 獲取 API 數據", type="primary", use_container_width=True)
@@ -372,24 +408,27 @@ if mode == "用户彩票分析":
             sort_dir = sc3.selectbox("排序顺序", ["由大到小", "由小到大"], index=0, key="dir_a")
             res = res.sort_values(by=sort_col, ascending=(sort_dir == "由小到大"))
             
-            st.markdown("""<div class='table-header'><div style='flex:0.6'>核查</div><div style='flex:1.5'>用户名</div><div style='flex:1.5'>彩种</div><div style='flex:2.5'>原因</div><div style='flex:1.2'>总销量</div><div style='flex:1.0'>单数</div><div style='flex:1.2'>盈亏</div><div style='flex:1.0'>RTP</div></div>""", unsafe_allow_html=True)
+            # 加入了平台欄位，並調整 flex 佈局比例
+            st.markdown("""<div class='table-header'><div style='flex:0.6'>核查</div><div style='flex:1.0'>平台</div><div style='flex:1.5'>用户名</div><div style='flex:1.5'>彩种</div><div style='flex:2.0'>原因</div><div style='flex:1.0'>总销量</div><div style='flex:0.8'>单数</div><div style='flex:1.0'>盈亏</div><div style='flex:0.8'>RTP</div></div>""", unsafe_allow_html=True)
             with st.container(height=500):
                 for i, row in res.iterrows():
                     u = row['用户名']; is_read = u in st.session_state.get("read_set_a", set())
-                    cols = st.columns([0.6, 1.5, 1.5, 2.5, 1.2, 1.0, 1.2, 1.0])
+                    # 新增一列用於顯示平台，總共 9 列
+                    cols = st.columns([0.6, 1.0, 1.5, 1.5, 2.0, 1.0, 0.8, 1.0, 0.8])
                     if cols[0].checkbox(" ", key=f"ka_{u}_{i}", value=is_read): 
                         if "read_set_a" not in st.session_state: st.session_state.read_set_a = set()
                         st.session_state.read_set_a.add(u)
                     else: st.session_state.read_set_a.discard(u)
                     style = "color:#94a3b8; text-decoration:line-through;" if is_read else "color:#1e293b;"
                     
-                    cols[1].markdown(f"<span style='{style}'>{u}</span>", unsafe_allow_html=True)
-                    cols[2].markdown(f"<span style='{style}'>{row.get('彩种', '-')}</span>", unsafe_allow_html=True)
-                    cols[3].markdown(f"<span class='badge-red'>{row['原因']}</span>", unsafe_allow_html=True)
-                    cols[4].markdown(f"<span style='{style}'>{row['销量']:,.0f}</span>", unsafe_allow_html=True)
-                    cols[5].markdown(f"<span style='{style}'>{int(row['单数'])}</span>", unsafe_allow_html=True)
-                    cols[6].markdown(f"<span style='{style}'>{row['盈亏']:,.0f}</span>", unsafe_allow_html=True)
-                    cols[7].markdown(f"<span style='{style}'>{row['RTP']:.3f}</span>", unsafe_allow_html=True)
+                    cols[1].markdown(f"<span style='{style}'>{row.get('平台', '-')}</span>", unsafe_allow_html=True)
+                    cols[2].markdown(f"<span style='{style}'>{u}</span>", unsafe_allow_html=True)
+                    cols[3].markdown(f"<span style='{style}'>{row.get('彩种', '-')}</span>", unsafe_allow_html=True)
+                    cols[4].markdown(f"<span class='badge-red'>{row['原因']}</span>", unsafe_allow_html=True)
+                    cols[5].markdown(f"<span style='{style}'>{row['销量']:,.0f}</span>", unsafe_allow_html=True)
+                    cols[6].markdown(f"<span style='{style}'>{int(row['单数'])}</span>", unsafe_allow_html=True)
+                    cols[7].markdown(f"<span style='{style}'>{row['盈亏']:,.0f}</span>", unsafe_allow_html=True)
+                    cols[8].markdown(f"<span style='{style}'>{row['RTP']:.3f}</span>", unsafe_allow_html=True)
                     st.divider()
             st.download_button("📥 导出结果", res.to_csv(index=False).encode('utf-8-sig'), "audit_a.csv")
         elif res is not None: st.success("✅ 扫描完毕，未发现异常。")
@@ -451,23 +490,26 @@ else: # 盈亏排行
                 sort_dir = sc3.selectbox("排序方向", ["由大到小", "由小到大"], index=0, key="dir_b")
                 res = res.sort_values(by=sort_col, ascending=(sort_dir == "由小到大"))
                 
-                st.markdown("""<div class='table-header'><div style='flex:0.6'>确认</div><div style='flex:1.5'>用户名</div><div style='flex:1.5'>彩种</div><div style='flex:2.5'>异常结论</div><div style='flex:1.0'>销量</div><div style='flex:1.0'>充值</div><div style='flex:1.0'>比值</div><div style='flex:1.0'>待遇</div><div style='flex:1.0'>盈亏</div></div>""", unsafe_allow_html=True)
+                # 加入了平台欄位，並調整 flex 佈局比例
+                st.markdown("""<div class='table-header'><div style='flex:0.6'>确认</div><div style='flex:1.0'>平台</div><div style='flex:1.5'>用户名</div><div style='flex:1.2'>彩种</div><div style='flex:2.0'>异常结论</div><div style='flex:1.0'>销量</div><div style='flex:1.0'>充值</div><div style='flex:0.8'>比值</div><div style='flex:1.0'>待遇</div><div style='flex:1.0'>盈亏</div></div>""", unsafe_allow_html=True)
                 with st.container(height=500):
                     for i, row in res.iterrows():
                         u = row['用户名']; is_read = u in st.session_state.get("read_set_b", set())
-                        cols = st.columns([0.6, 1.5, 1.5, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0])
+                        # 新增一列用於顯示平台，總共 10 列
+                        cols = st.columns([0.6, 1.0, 1.5, 1.2, 2.0, 1.0, 1.0, 0.8, 1.0, 1.0])
                         if cols[0].checkbox(" ", key=f"fb_{u}_{i}", value=is_read):
                             if "read_set_b" not in st.session_state: st.session_state.read_set_b = set()
                             st.session_state.read_set_b.add(u)
                         else: st.session_state.read_set_b.discard(u)
                         style = "color:#94a3b8; text-decoration:line-through;" if is_read else "color:#1e293b;"
                         
-                        cols[1].markdown(f"<span style='{style}'>{u}</span>", unsafe_allow_html=True)
-                        cols[2].markdown(f"<span style='{style}'>{row.get('彩种', '-')}</span>", unsafe_allow_html=True)
-                        cols[3].markdown(f"<span class='badge-giant'>{row['原因']}</span>", unsafe_allow_html=True)
-                        cols[4].markdown(f"<span style='{style}'>{row['销量']:,.1f}</span>", unsafe_allow_html=True)
-                        cols[5].markdown(f"<span style='{style}'>{row['充值']:,.1f}</span>", unsafe_allow_html=True)
-                        cols[6].markdown(f"<span style='{style}'>{row['充销比']:.2f}</span>", unsafe_allow_html=True)
-                        cols[7].markdown(f"<span style='{style}'>{row['待遇']:,.1f}</span>", unsafe_allow_html=True)
-                        cols[8].markdown(f"<span style='{style}'>{row['盈亏']:,.1f}</span>", unsafe_allow_html=True)
+                        cols[1].markdown(f"<span style='{style}'>{row.get('平台', '-')}</span>", unsafe_allow_html=True)
+                        cols[2].markdown(f"<span style='{style}'>{u}</span>", unsafe_allow_html=True)
+                        cols[3].markdown(f"<span style='{style}'>{row.get('彩种', '-')}</span>", unsafe_allow_html=True)
+                        cols[4].markdown(f"<span class='badge-giant'>{row['原因']}</span>", unsafe_allow_html=True)
+                        cols[5].markdown(f"<span style='{style}'>{row['销量']:,.1f}</span>", unsafe_allow_html=True)
+                        cols[6].markdown(f"<span style='{style}'>{row['充值']:,.1f}</span>", unsafe_allow_html=True)
+                        cols[7].markdown(f"<span style='{style}'>{row['充销比']:.2f}</span>", unsafe_allow_html=True)
+                        cols[8].markdown(f"<span style='{style}'>{row['待遇']:,.1f}</span>", unsafe_allow_html=True)
+                        cols[9].markdown(f"<span style='{style}'>{row['盈亏']:,.1f}</span>", unsafe_allow_html=True)
                         st.divider()
