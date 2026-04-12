@@ -50,7 +50,7 @@ if not st.session_state.auth:
             else: st.error("❌ 密码错误")
     st.stop()
 
-# --- API 獲取引擎 ---
+# --- API 獲取引擎 (加入強健的防呆機制) ---
 def fetch_api_data(url, dt_start, dt_end, platform):
     """通用 API 數據獲取函式"""
     API_KEY = "sk-d79a713caf53e8bdh3154a596ca1a0166234df7"
@@ -75,8 +75,23 @@ def fetch_api_data(url, dt_start, dt_end, platform):
     
     try:
         response = requests.get(url, headers=headers, params=params, timeout=60)
-        response.raise_for_status()
-        data = response.json()
+        
+        # 1. 如果伺服器明確回傳錯誤狀態碼 (如 404, 500, 502)
+        if not response.ok:
+            st.error(f"⚠️ API 請求失敗 (狀態碼 {response.status_code})")
+            with st.expander("🔍 點擊查看伺服器拒絕詳情"):
+                st.text(response.text[:2000] if response.text else "無回傳內容")
+            return None
+            
+        # 2. 攔截 JSON 解析錯誤 (防止回傳 HTML 導致崩潰)
+        try:
+            data = response.json()
+        except ValueError: # 捕捉 JSONDecodeError
+            st.error("❌ 伺服器回傳了無效的資料格式！(API 可能異常或當機中)")
+            st.warning("請展開下方訊息，確認伺服器到底回傳了什麼內容。")
+            with st.expander("🔍 點擊查看伺服器實際回傳內容"):
+                st.text(response.text[:2000] if response.text else "（伺服器回傳為空）")
+            return None
         
         if isinstance(data, dict) and 'data' in data:
             df = pd.DataFrame(data['data'])
@@ -85,14 +100,11 @@ def fetch_api_data(url, dt_start, dt_end, platform):
             
         return df
         
-    except requests.exceptions.HTTPError as http_err:
-        error_body = response.text if response.text else "伺服器未提供錯誤說明"
-        st.error(f"⚠️ API 請求失敗 (狀態碼 {response.status_code})")
-        st.warning(f"**伺服器拒絕原因:** `{error_body}`")
-        st.info(f"**實際發送的完整網址 (供核對):**\n`{response.url}`")
+    except requests.exceptions.RequestException as e:
+        st.error(f"⚠️ 網路連線異常，請確認 API 伺服器是否正常: {e}")
         return None
     except Exception as e:
-        st.error(f"API 請求發生未預期的錯誤！詳細錯誤: {e}")
+        st.error(f"⚠️ 發生未預期的內部錯誤: {e}")
         return None
 
 # --- 新增：精準獲取平台欄位 ---
