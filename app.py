@@ -1,9 +1,19 @@
 import streamlit as st
 import pandas as pd
-import requests
 import datetime
 import time
 from urllib.parse import urlparse
+
+# -------------------------------------------------------------
+# 【終極 WAF 突破套件載入】
+# 使用 curl_cffi 來完美偽裝 Chrome 瀏覽器的 TLS/JA3 底層指紋
+# -------------------------------------------------------------
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CFFI = True
+except ImportError:
+    import requests
+    HAS_CFFI = False
 
 # 1. 页面配置
 st.set_page_config(page_title="抓鬼专家", layout="wide")
@@ -37,6 +47,10 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+# 偵測是否安裝了突破套件
+if not HAS_CFFI:
+    st.error("🚨 系統檢測到缺少 AWS WAF 突破套件 `curl_cffi`，請在終端機執行 `pip install curl_cffi`，否則您將持續被防火牆攔截！")
+
 # 3. 登录逻辑
 if "auth" not in st.session_state: st.session_state.auth = False
 if not st.session_state.auth:
@@ -50,7 +64,7 @@ if not st.session_state.auth:
             else: st.error("❌ 密码错误")
     st.stop()
 
-# --- API 獲取引擎 (強化版 WAF 繞過與診斷機制) ---
+# --- API 獲取引擎 (導入真實 Chrome 116 瀏覽器 TLS 偽裝) ---
 def fetch_api_data(url, dt_start, dt_end, platform):
     API_KEY = "sk-d79a713caf53e8bdh3154a596ca1a0166234df7"
     
@@ -61,8 +75,7 @@ def fetch_api_data(url, dt_start, dt_end, platform):
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
         "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "Upgrade-Insecure-Requests": "1"
     }
     
     start_str = dt_start.strftime("%Y-%m-%d %H:%M:%S")
@@ -76,9 +89,15 @@ def fetch_api_data(url, dt_start, dt_end, platform):
         "key": API_KEY 
     }
     
-    session = requests.Session()
-    
     try:
+        if HAS_CFFI:
+            # 這是突破 AWS WAF 的核心：直接模擬 Chrome 116 的底層特徵
+            session = cffi_requests.Session(impersonate="chrome116")
+        else:
+            # 如果沒安裝，退回會被擋的舊方法
+            session = requests.Session()
+            headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            
         response = session.get(url, headers=headers, params=params, timeout=30)
         
         # 嚴謹偵測初階 CC 防護 (setTimeout 800ms 跳轉)
@@ -97,12 +116,12 @@ def fetch_api_data(url, dt_start, dt_end, platform):
             st.error(f"⚠️ API 請求失敗 (狀態碼 {response.status_code})")
             return None
             
-        # 【核心新增】：嚴謹偵測高階 AWS WAF 防護 (Proof-of-Work JS Challenge)
+        # 嚴謹偵測高階 AWS WAF 防護 (如果偽裝失敗，或者沒裝 curl_cffi)
         if "awsWafCookieDomainList" in response.text or "challenge.js" in response.text:
             st.error("🛑 嚴重系統警告：遭到目標網站 AWS WAF 防火牆攔截")
-            st.warning("💡 診斷結論：您的後端 API (`stats-crawler.up.railway.app`) 去抓取目標資料時，被 AWS WAF 的人機驗證盾擋下了。這無法透過本前端程式修復，您必須登入後端伺服器更換爬蟲 IP，或升級後端爬蟲的自動化指紋繞過能力 (如使用 Selenium/Playwright)。")
+            st.warning("💡 診斷結論：您的請求指紋被 AWS 識破了。請確認您已正確安裝並啟用 `curl_cffi` 套件來進行瀏覽器偽裝。")
             with st.expander("🔍 點擊查看防火牆攔截特徵"):
-                st.text("特徵字眼包含: awsWafCookieDomainList, challenge.js, reportChallengeError")
+                st.text("特徵字眼包含: awsWafCookieDomainList, challenge.js")
             return None
             
         # 其他未知的 HTML 頁面阻擋
@@ -127,11 +146,8 @@ def fetch_api_data(url, dt_start, dt_end, platform):
             return pd.DataFrame(data['data'])
         return pd.DataFrame(data)
         
-    except requests.exceptions.RequestException as e:
-        st.error(f"⚠️ 網路連線異常: {e}")
-        return None
     except Exception as e:
-        st.error(f"⚠️ 系統發生未預期錯誤: {e}")
+        st.error(f"⚠️ 系統發生網路連線或未預期錯誤: {e}")
         return None
 
 # --- 精準獲取平台欄位 ---
@@ -144,15 +160,16 @@ def get_platform_col(df):
         if any(a in str(c).lower().strip() for a in ['平台', 'platform', 'site']): return c
     return None
 
-# --- 極致嚴謹的帳號欄位提取引擎 (V3: 絕對杜絕彩種與短數字干擾) ---
+# --- 絕對嚴謹的帳號欄位提取引擎 (V4: 強制排除彩種與無效數字) ---
 def get_exact_user_col(df):
     """
     結合欄位名稱與實際資料內容進行極度嚴格的雙重驗證。
+    保證只拿真正的用戶名，絕對不要「台灣PK10」或「123」。
     """
     exact_user_cols = ['username', 'account', '用户名', '用戶名', '账号', '帳號', '会员账号', 'member', 'loginname', 'membername', 'user_name', 'user_account']
     lower_cols = {str(c).strip().lower(): c for c in df.columns}
     
-    # 1. 精準名稱直擊
+    # 1. 絕對精準名稱直擊 (若 API 乖乖用標準名稱，直接命中)
     for col in exact_user_cols:
         if col in lower_cols:
             return lower_cols[col]
@@ -160,14 +177,15 @@ def get_exact_user_col(df):
     # 2. 禁忌關鍵字：只要欄位名稱包含這些，直接秒殺排除
     forbidden_col_names = ['彩', '游戏', 'game', 'lottery', '平台', 'site', 'time', 'date', '期号', '订单', 'id', '单号', '金额', '盈亏', '状态', '名称']
     
-    # 彩種與無效數據特徵庫
-    game_keywords = ['pk10', '分分彩', '时时彩', '快3', '快三', '六合彩', '赛车', '飞艇', '百家乐', '体育', '电竞', '彩票', '真人', '龙虎', '三分', '五分', '秒速']
+    # 擴充：彩種與無效數據特徵庫 (包含台灣、奇趣等常誤判字眼)
+    game_keywords = ['pk10', '分分彩', '时时彩', '快3', '快三', '六合彩', '赛车', '飞艇', '百家乐', '体育', '电竞', '彩票', '真人', '龙虎', '三分', '五分', '秒速', '奇趣', '台湾', '澳洲', '极速']
     
     best_candidate = None
     
     for c in df.columns:
         c_str = str(c).lower().strip()
         
+        # 欄位名稱包含禁忌字直接跳過
         if any(f in c_str for f in forbidden_col_names): continue
             
         sample = df[c].dropna().astype(str).head(20)
@@ -181,23 +199,24 @@ def get_exact_user_col(df):
                 break
         if is_game_col: continue
             
-        # 嚴格審查 B：絕對封殺「全為純數字且過短」的欄位 (例如流水號 ID)
-        # 若所有樣本字串都是數字，且平均長度小於 5 碼，直接排除
+        # 嚴格審查 B：絕對封殺「流水號」與「短ID」
+        # 若所有樣本字串都是純數字，且平均長度小於 6 碼 (帳號很少小於6碼純數字)，直接排除
         if all(val.isdigit() for val in sample):
             avg_num_len = sum(len(val) for val in sample) / len(sample)
-            if avg_num_len < 5:
+            if avg_num_len < 6:
                 continue
                 
-        # 若通過上述極端測試，且名稱包含以下字根，即為帳號
-        if any(k in c_str for k in ['user', 'account', '会员', '帐', '帳']):
+        # 若通過上述極端測試，且名稱包含以下字根，即認定為帳號
+        if any(k in c_str for k in ['user', 'account', '会员', '帐', '帳', '名']):
             return c
             
-        # 最嚴格的盲猜備案：必須是字串型態，且平均長度落在 5~20 的合理帳號範圍內
+        # 最嚴格的盲猜備案：必須是字串型態，平均長度在 5~25 之間，且不全為純數字短碼
         if best_candidate is None and sample.dtype == object:
             avg_len = sum(len(val) for val in sample) / len(sample)
-            if 5 <= avg_len <= 20 and not all(val.isdigit() for val in sample): 
+            if 5 <= avg_len <= 25 and not all(val.isdigit() and len(val)<6 for val in sample): 
                 best_candidate = c
 
+    # 如果真的一無所獲，回傳第一欄位作為不得已的預設
     return best_candidate if best_candidate else df.columns[0]
 
 # --- 核心引擎 A ---
