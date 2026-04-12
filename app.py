@@ -3,11 +3,12 @@ import pandas as pd
 import requests
 import datetime
 import time
+from urllib.parse import urlparse
 
 # 1. 页面配置
 st.set_page_config(page_title="抓鬼专家", layout="wide")
 
-# 2. 注入所有原始样式 (合并两份代码的 CSS)
+# 2. 注入所有原始样式
 st.markdown("""
     <style>
     .stApp { background-color: #f8fafc; }
@@ -16,13 +17,11 @@ st.markdown("""
     [data-testid="stSidebar"] p, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] .stToggle p { 
         color: #1e293b !important; font-weight: 700 !important; 
     }
-    /* 统计看板 A */
     .metric-card-a {
         background-color: #ffffff; padding: 15px; border-radius: 12px;
         box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-top: 5px solid #ef4444;
         text-align: center; margin-bottom: 10px;
     }
-    /* 统计看板 B */
     .metric-card-b {
         background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); 
         border-bottom: 4px solid #ef4444; text-align: center;
@@ -51,16 +50,18 @@ if not st.session_state.auth:
             else: st.error("❌ 密码错误")
     st.stop()
 
-# --- API 獲取引擎 (加入強健的 WAF 繞過機制) ---
+# --- API 獲取引擎 (強化版 WAF 繞過機制) ---
 def fetch_api_data(url, dt_start, dt_end, platform):
-    """通用 API 數據獲取函式"""
     API_KEY = "sk-d79a713caf53e8bdh3154a596ca1a0166234df7"
     
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "X-API-Key": API_KEY,
         "apikey": API_KEY,
-        "Accept": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
@@ -75,122 +76,131 @@ def fetch_api_data(url, dt_start, dt_end, platform):
         "key": API_KEY 
     }
     
-    # 創建 Session 以保持 Cookie，破解防爬蟲跳轉
     session = requests.Session()
     
     try:
-        response = session.get(url, headers=headers, params=params, timeout=60)
+        # 第一階段請求
+        response = session.get(url, headers=headers, params=params, timeout=30)
         
-        # 【核心修復】：偵測到 WAF 驗證的 JavaScript 跳轉代碼
-        if response.status_code == 200 and "location.href=" in response.text and "Date.now()" in response.text:
-            # 擷取基礎網址
-            base_url = url.split("/api/")[0]
-            # 模擬 JS 中的 Date.now()
+        # 嚴謹偵測 WAF 的 Date.now() JS 跳轉挑戰
+        if response.status_code == 200 and "location.href=" in response.text and "_r=" in response.text:
+            # 模擬瀏覽器的 setTimeout 800ms
+            time.sleep(0.9) 
+            
+            # 確保提取正確的 base URL (例如 https://stats-crawler.up.railway.app)
+            parsed_url = urlparse(url)
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            
             timestamp = int(time.time() * 1000)
             bypass_url = f"{base_url}/?_r={timestamp}"
             
-            # 1. 訪問跳轉網址以獲取驗證通過的 Cookie
+            # 帶上 Referer 訪問驗證頁面，換取 Cookie
+            headers["Referer"] = response.url
             session.get(bypass_url, headers=headers, timeout=15)
             
-            # 2. 攜帶有效 Cookie 重新發起真正的 API 請求
-            response = session.get(url, headers=headers, params=params, timeout=60)
+            # 攜帶認證過後的 Cookie 重新請求原始 API
+            response = session.get(url, headers=headers, params=params, timeout=45)
 
-        # 1. 如果伺服器明確回傳錯誤狀態碼
+        # 錯誤狀態碼攔截
         if not response.ok:
             st.error(f"⚠️ API 請求失敗 (狀態碼 {response.status_code})")
-            with st.expander("🔍 點擊查看伺服器拒絕詳情"):
-                st.text(response.text[:2000] if response.text else "無回傳內容")
             return None
             
-        # 2. 若經過繞過後，依然回傳 HTML，則代表被徹底阻擋
+        # 若繞過後仍然被擋，且為 HTML 格式，判定為失敗
         if response.text.strip().startswith('<!DOCTYPE') or '<html' in response.text.lower():
-            st.error("❌ 伺服器防護極為嚴格，已阻擋自動化請求。無法獲取數據。")
+            if "location.href=" in response.text:
+                st.error("❌ 伺服器防護極為嚴格，自動繞過 JS 盾失敗，請求被攔截。")
+            else:
+                st.error("❌ 伺服器回傳了未知的 HTML 防護頁面。")
             with st.expander("🔍 點擊查看伺服器實際回傳內容"):
                 st.text(response.text[:2000])
             return None
             
-        # 3. 處理空字串 (查無資料)
+        # 空字串處理
         if not response.text or not response.text.strip():
             return pd.DataFrame()
             
-        # 4. 解析 JSON
+        # 嘗試解析 JSON
         try:
             data = response.json()
         except ValueError: 
-            st.error("❌ 伺服器回傳了無效的資料格式！")
+            st.error("❌ 伺服器回傳了非 JSON 的無效資料格式！")
             return None
         
         if isinstance(data, dict) and 'data' in data:
-            df = pd.DataFrame(data['data'])
-        else:
-            df = pd.DataFrame(data)
-            
-        return df
+            return pd.DataFrame(data['data'])
+        return pd.DataFrame(data)
         
     except requests.exceptions.RequestException as e:
-        st.error(f"⚠️ 網路連線異常，請確認 API 伺服器是否正常: {e}")
+        st.error(f"⚠️ 網路連線異常: {e}")
         return None
     except Exception as e:
-        st.error(f"⚠️ 發生未預期的內部錯誤: {e}")
+        st.error(f"⚠️ 系統發生未預期錯誤: {e}")
         return None
 
 # --- 精準獲取平台欄位 ---
 def get_platform_col(df):
-    """精準抓取 API 端口的平台欄位"""
     exact_cols = ['platform', 'site', '平台', 'sitecode', 'site_code']
     lower_cols = {str(c).strip().lower(): c for c in df.columns}
-    
-    # 1. 優先精準比對
     for col in exact_cols:
-        if col in lower_cols:
-            return lower_cols[col]
-            
-    # 2. 模糊比對
+        if col in lower_cols: return lower_cols[col]
     for c in df.columns:
-        c_str = str(c).lower().strip()
-        if any(a in c_str for a in ['平台', 'platform', 'site']):
-            return c
-            
+        if any(a in str(c).lower().strip() for a in ['平台', 'platform', 'site']): return c
     return None
 
-# --- 優化：精準獲取帳號欄位 (防範抓到彩种) ---
+# --- 極致嚴謹的帳號欄位提取引擎 (杜絕彩種與短數字干擾) ---
 def get_exact_user_col(df):
-    """精準抓取 API 端口帳號名稱，強制避免將彩种名誤判為帳號"""
-    exact_user_cols = ['username', 'account', '用户名', '用戶名', '账号', '帳號', '会员账号', 'member', 'loginname', 'membername']
+    """
+    結合欄位名稱與實際資料內容進行雙重驗證。
+    絕不會抓到「奇趣分分彩」或「123」這種非帳號字串。
+    """
+    # 1. 最高優先級：精準名單直指核心
+    exact_user_cols = ['username', 'account', '用户名', '用戶名', '账号', '帳號', '会员账号', 'member', 'loginname', 'membername', 'user_name', 'user_account']
     lower_cols = {str(c).strip().lower(): c for c in df.columns}
     
-    # 1. 優先進行精準比對
     for col in exact_user_cols:
         if col in lower_cols:
             return lower_cols[col]
             
-    # 定義絕對不能判定為帳號的禁忌字眼
-    forbidden_keywords = ['彩种', '游戏', 'game', 'lottery', '平台', 'platform', 'site', 'time', 'date', '时间', '日期']
-            
-    # 2. 降級：如果沒找到，則進行原本的模糊過濾
-    user_aliases = ['账号', '帳號', '用户名', '用戶名', '会员', 'user', 'account', 'member']
+    # 2. 禁忌關鍵字：欄位名稱包含這些，直接排除
+    forbidden_col_names = ['彩', '游戏', 'game', 'lottery', '平台', 'site', 'time', 'date', '期号', '订单', 'id', '单号', '金额', '盈亏', '状态', '名称']
+    
+    # 彩種常見特徵字眼
+    game_keywords = ['pk10', '分分彩', '时时彩', '快3', '快三', '六合彩', '赛车', '飞艇', '百家乐', '体育', '电竞', '彩票', '真人', '龙虎']
+    
+    best_candidate = None
     
     for c in df.columns:
         c_str = str(c).lower().strip()
-        # 若包含禁忌字眼，直接跳過，絕不視為帳號欄位
-        if any(f in c_str for f in forbidden_keywords):
+        
+        # 排除禁忌欄位
+        if any(f in c_str for f in forbidden_col_names):
             continue
-        # 若包含帳號關鍵字，則認定為帳號欄位
-        if any(a in c_str for a in user_aliases):
-            return c
             
-    # 3. 終極盲猜：排除禁忌字眼後，尋找內容像帳號的欄位
-    for c in df.columns:
-        c_str = str(c).lower().strip()
-        if any(f in c_str for f in forbidden_keywords):
-            continue
-        sample = df[c].dropna().astype(str).head(10)
+        # 抽樣資料進行內容探勘
+        sample = df[c].dropna().astype(str).head(15)
         if sample.empty: continue
-        # 簡單驗證：長度正常，且非純數值(或純數值但不像統計數據)
-        if all(len(x) >= 3 for x in sample):
+        
+        # 檢查 A：若內容包含任何彩種關鍵字，該欄位絕對是遊戲名，剔除！
+        if any(any(gk in val.lower() for gk in game_keywords) for val in sample):
+            continue
+            
+        # 檢查 B：如果全部都是超短純數字 (<5碼)，通常是流水號或ID，剔除！
+        if all(val.isdigit() and len(val) < 5 for val in sample):
+            continue
+            
+        # 通過上述嚴格檢驗後，若欄位名包含以下關鍵字，即認定為帳號
+        if any(k in c_str for k in ['user', 'account', '会员', '帐', '帳']):
             return c
             
-    return df.columns[0] # 最後手段
+        # 備用候選：記錄第一個看起來像是字串、且平均長度合理的欄位
+        if best_candidate is None and sample.dtype == object:
+            avg_len = sum(len(val) for val in sample) / len(sample)
+            if 4 <= avg_len <= 25:  # 帳號長度通常落在此區間
+                best_candidate = c
+
+    # 若所有條件都沒中，安全回傳備用候選，若無備用才退回第一列
+    return best_candidate if best_candidate else df.columns[0]
 
 # --- 核心引擎 A ---
 def run_audit_engine(df, rules):
@@ -218,7 +228,7 @@ def run_audit_engine(df, rules):
 
         temp_df = pd.DataFrame()
         temp_df['用户名'] = df[final_cols['user']].astype(str)
-        temp_df['平台'] = df[platform_col].astype(str) if platform_col else "-" # 寫入平台資料
+        temp_df['平台'] = df[platform_col].astype(str) if platform_col else "-" 
         
         temp_df['销量'] = pd.to_numeric(df[final_cols.get('vol', df.columns[1])].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         temp_df['单数'] = pd.to_numeric(df[final_cols.get('cnt', df.columns[2])].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
@@ -229,7 +239,7 @@ def run_audit_engine(df, rules):
             temp_df['彩种'] = df[game_cols[0]].astype(str)
 
         agg_dict = {'销量':'sum', '单数':'sum', '盈亏':'sum', '奖金':'sum'}
-        agg_dict['平台'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']])))) # 聚合平台
+        agg_dict['平台'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']])))) 
         
         if has_game:
             agg_dict['彩种'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
@@ -283,7 +293,7 @@ def run_strict_audit(df, cfg):
 
         clean_df = pd.DataFrame()
         clean_df['用户名'] = df[final_user_col].astype(str)
-        clean_df['平台'] = df[platform_col].astype(str) if platform_col else "-" # 寫入平台資料
+        clean_df['平台'] = df[platform_col].astype(str) if platform_col else "-" 
         
         target_mappings = {
             '个人充值手续费': ['充值', 'recharge', 'fee', '个人充值手续费'],
@@ -307,7 +317,7 @@ def run_strict_audit(df, cfg):
             clean_df['彩种'] = df[game_cols[0]].astype(str)
 
         agg_dict = {'个人充值手续费':'sum','个人派奖':'sum','个人自身返点/返水':'sum','个人系统分红':'sum','盈亏':'sum'}
-        agg_dict['平台'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']])))) # 聚合平台
+        agg_dict['平台'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']])))) 
         
         if has_game:
             agg_dict['彩种'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
@@ -367,12 +377,10 @@ with st.sidebar:
     platform_options = ["", "YD", "ND", "JD", "SY", "MT", "LY", "FB", "XY", "XO", "OL", "LS", "HS", "JY", "SH", "XH"]
     api_platform = st.selectbox("🏢 目標平台", options=platform_options, format_func=lambda x: "全平台 (查詢所有平台)" if x == "" else x)
     
-    # 【還原您的原始設計】：後端可能需要接收完整的平台字串代碼才會回傳正確資料
     actual_request_platform = api_platform if api_platform != "" else ",".join([p for p in platform_options if p != ""])
     
     fetch_clicked = st.button("🔄 獲取 API 數據", type="primary", use_container_width=True)
     
-    # 執行獲取數據邏輯
     if fetch_clicked:
         if mode == "用户彩票分析":
             with st.spinner("正在連線抓取【用户彩票分析】數據..."):
@@ -381,7 +389,7 @@ with st.sidebar:
                     st.session_state.raw_data_a = raw_data
                     st.session_state.read_set_a = set()
                     st.success("✅ 數據獲取成功！")
-                else:
+                elif raw_data is not None and raw_data.empty:
                     st.warning("⚠️ 此區間/平台查無資料或回傳為空")
         else:
             with st.spinner("正在連線抓取【盈亏排行】數據..."):
@@ -390,7 +398,7 @@ with st.sidebar:
                     st.session_state.raw_data_b = raw_data
                     st.session_state.read_set_b = set()
                     st.success("✅ 數據獲取成功！")
-                else:
+                elif raw_data is not None and raw_data.empty:
                     st.warning("⚠️ 此區間/平台查無資料或回傳為空")
     
     st.write("---")
@@ -447,12 +455,10 @@ if mode == "用户彩票分析":
             sort_dir = sc3.selectbox("排序顺序", ["由大到小", "由小到大"], index=0, key="dir_a")
             res = res.sort_values(by=sort_col, ascending=(sort_dir == "由小到大"))
             
-            # 加入了平台欄位，並調整 flex 佈局比例
             st.markdown("""<div class='table-header'><div style='flex:0.6'>核查</div><div style='flex:1.0'>平台</div><div style='flex:1.5'>用户名</div><div style='flex:1.5'>彩种</div><div style='flex:2.0'>原因</div><div style='flex:1.0'>总销量</div><div style='flex:0.8'>单数</div><div style='flex:1.0'>盈亏</div><div style='flex:0.8'>RTP</div></div>""", unsafe_allow_html=True)
             with st.container(height=500):
                 for i, row in res.iterrows():
                     u = row['用户名']; is_read = u in st.session_state.get("read_set_a", set())
-                    # 新增一列用於顯示平台，總共 9 列
                     cols = st.columns([0.6, 1.0, 1.5, 1.5, 2.0, 1.0, 0.8, 1.0, 0.8])
                     if cols[0].checkbox(" ", key=f"ka_{u}_{i}", value=is_read): 
                         if "read_set_a" not in st.session_state: st.session_state.read_set_a = set()
@@ -529,12 +535,10 @@ else: # 盈亏排行
                 sort_dir = sc3.selectbox("排序方向", ["由大到小", "由小到大"], index=0, key="dir_b")
                 res = res.sort_values(by=sort_col, ascending=(sort_dir == "由小到大"))
                 
-                # 加入了平台欄位，並調整 flex 佈局比例
                 st.markdown("""<div class='table-header'><div style='flex:0.6'>确认</div><div style='flex:1.0'>平台</div><div style='flex:1.5'>用户名</div><div style='flex:1.2'>彩种</div><div style='flex:2.0'>异常结论</div><div style='flex:1.0'>销量</div><div style='flex:1.0'>充值</div><div style='flex:0.8'>比值</div><div style='flex:1.0'>待遇</div><div style='flex:1.0'>盈亏</div></div>""", unsafe_allow_html=True)
                 with st.container(height=500):
                     for i, row in res.iterrows():
                         u = row['用户名']; is_read = u in st.session_state.get("read_set_b", set())
-                        # 新增一列用於顯示平台，總共 10 列
                         cols = st.columns([0.6, 1.0, 1.5, 1.2, 2.0, 1.0, 1.0, 0.8, 1.0, 1.0])
                         if cols[0].checkbox(" ", key=f"fb_{u}_{i}", value=is_read):
                             if "read_set_b" not in st.session_state: st.session_state.read_set_b = set()
