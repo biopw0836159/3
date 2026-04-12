@@ -53,18 +53,29 @@ if not st.session_state.auth:
 # --- API 獲取引擎 ---
 def fetch_api_data(url, date_start, date_end):
     """通用 API 數據獲取函式"""
+    API_KEY = "sk-d79a713caf53e8bdh3154a596ca1a0166234df7"
+    
     headers = {
-        "Authorization": "Bearer sk-d79a713caf53e8bdh3154a596ca1a0166234df7",
-        "X-API-Key": "sk-d79a713caf53e8bdh3154a596ca1a0166234df7",
-        "apikey": "sk-d79a713caf53e8bdh3154a596ca1a0166234df7"
+        "Authorization": f"Bearer {API_KEY}",
+        "X-API-Key": API_KEY,
+        "apikey": API_KEY,
+        "Accept": "application/json"
     }
+    
+    # 將使用者選擇的日期轉換為附帶 03:00:00 的精確時間格式
+    start_str = f"{date_start.strftime('%Y-%m-%d')} 03:00:00"
+    end_str = f"{date_end.strftime('%Y-%m-%d')} 03:00:00"
+    
     params = {
-        "dateStart": date_start.strftime("%Y-%m-%d"),
-        "dateEnd": date_end.strftime("%Y-%m-%d")
+        "dateStart": start_str,
+        "dateEnd": end_str,
+        "apiKey": API_KEY, # 將密鑰也放入 query 避免伺服器只吃 Query
+        "key": API_KEY 
     }
+    
     try:
         response = requests.get(url, headers=headers, params=params, timeout=60)
-        response.raise_for_status()
+        response.raise_for_status() # 檢查 HTTP 狀態碼
         data = response.json()
         
         # 兼容常見 API JSON 結構 (直接回傳陣列 或 包在 data 欄位內)
@@ -72,14 +83,24 @@ def fetch_api_data(url, date_start, date_end):
             df = pd.DataFrame(data['data'])
         else:
             df = pd.DataFrame(data)
+            
         return df
+        
+    except requests.exceptions.HTTPError as http_err:
+        # 如果發生 400 Bad Request 等錯誤，抓取伺服器的真實錯誤訊息並印出
+        error_body = response.text if response.text else "伺服器未提供錯誤說明"
+        st.error(f"⚠️ API 請求失敗 (狀態碼 {response.status_code})")
+        st.warning(f"**伺服器拒絕原因:** `{error_body}`")
+        st.info(f"**實際發送的完整網址 (供核對):**\n`{response.url}`")
+        return None
     except Exception as e:
-        st.error(f"API 請求失敗，請檢查網路狀態或伺服器！詳細錯誤: {e}")
+        st.error(f"API 請求發生未預期的錯誤！詳細錯誤: {e}")
         return None
 
 # --- 核心引擎 A ---
 def run_audit_engine(df, rules):
     try:
+        if df.empty: return None
         df.columns = [str(c).strip() for c in df.columns]
         
         # 精準識別「帳號」欄位 (避開純數字 ID 與 彩種名稱)
@@ -162,6 +183,7 @@ def run_audit_engine(df, rules):
 # --- 核心引擎 B ---
 def run_strict_audit(df, cfg):
     try:
+        if df.empty: return None
         df.columns = [str(c).strip() for c in df.columns]
         
         # 尋找用戶名 (避開彩種與純數字 ID)
@@ -275,7 +297,7 @@ if mode == "用户彩票分析":
                 st.session_state.read_set_a = set()
                 st.success("✅ 數據獲取成功！")
             else:
-                st.warning("⚠️ 此區間查無資料或回傳為空")
+                st.warning("⚠️ 此區間查無資料或回傳為空 (若上方有顯示錯誤訊息請參考)")
 
     raw = st.session_state.get("raw_data_a")
     all_games = []
@@ -359,7 +381,7 @@ else: # 盈亏排行
                 st.session_state.read_set_b = set()
                 st.success("✅ 數據獲取成功！")
             else:
-                st.warning("⚠️ 此區間查無資料或回傳為空")
+                st.warning("⚠️ 此區間查無資料或回傳為空 (若上方有顯示錯誤訊息請參考)")
     
     raw_b = st.session_state.get("raw_data_b")
     all_games_b = []
