@@ -85,7 +85,11 @@ def fetch_api_data(url, dt_start, dt_end, platform):
                 st.text(response.text[:2000] if response.text else "無回傳內容")
             return None
             
-        # 2. 攔截 JSON 解析錯誤 (防止回傳 HTML 導致崩潰)
+        # 2. 新增防呆：處理 HTTP 200 但伺服器回傳為空的狀況 (視為查無資料)
+        if not response.text or not response.text.strip():
+            return pd.DataFrame()
+            
+        # 3. 攔截 JSON 解析錯誤 (防止回傳 HTML 導致崩潰)
         try:
             data = response.json()
         except ValueError: # 捕捉 JSONDecodeError
@@ -109,7 +113,7 @@ def fetch_api_data(url, dt_start, dt_end, platform):
         st.error(f"⚠️ 發生未預期的內部錯誤: {e}")
         return None
 
-# --- 新增：精準獲取平台欄位 ---
+# --- 精準獲取平台欄位 ---
 def get_platform_col(df):
     """精準抓取 API 端口的平台欄位"""
     exact_cols = ['platform', 'site', '平台', 'sitecode', 'site_code']
@@ -132,7 +136,6 @@ def get_platform_col(df):
 def get_exact_user_col(df):
     """精準抓取 API 端口帳號名稱，強制避免將彩種名誤判為帳號"""
     exact_user_cols = ['username', 'account', '用户名', '用戶名', '账号', '帳號', '会员账号', 'member', 'loginname', 'membername']
-    # 建立映射表，清除欄位前後可能存在的隱藏空白字元
     lower_cols = {str(c).strip().lower(): c for c in df.columns}
     
     # 1. 優先進行精準比對
@@ -343,7 +346,8 @@ with st.sidebar:
     platform_options = ["", "YD", "ND", "JD", "SY", "MT", "LY", "FB", "XY", "XO", "OL", "LS", "HS", "JY", "SH", "XH"]
     api_platform = st.selectbox("🏢 目標平台", options=platform_options, format_func=lambda x: "全平台 (查詢所有平台)" if x == "" else x)
     
-    actual_request_platform = api_platform if api_platform != "" else ",".join([p for p in platform_options if p != ""])
+    # 【關鍵修復點】：若選擇全平台，直接發送空字串，不要強行拼接所有代碼造成伺服器解析失敗回傳空值
+    actual_request_platform = api_platform 
     
     fetch_clicked = st.button("🔄 獲取 API 數據", type="primary", use_container_width=True)
     
