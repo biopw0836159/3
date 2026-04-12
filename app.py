@@ -68,14 +68,10 @@ def fetch_api_data(url, dt_start, dt_end, platform):
     params = {
         "dateStart": start_str,
         "dateEnd": end_str,
+        "platform": platform, # 直接帶入組裝好的多平台字串，滿足 API 必填條件
         "apiKey": API_KEY, 
         "key": API_KEY 
     }
-    
-    # 【修改點】繞過強制帶入 XO 的邏輯，如果選擇全平台（空白），則帶入空值或不帶平台參數
-    actual_platform = platform.strip() if platform else ""
-    if actual_platform:
-        params["platform"] = actual_platform
     
     try:
         response = requests.get(url, headers=headers, params=params, timeout=60)
@@ -101,7 +97,7 @@ def fetch_api_data(url, dt_start, dt_end, platform):
 
 # --- 通用：精準獲取帳號欄位 ---
 def get_exact_user_col(df):
-    """【修改點】精準抓取 API 端口帳號名稱，優先比對常見標準欄位"""
+    """精準抓取 API 端口帳號名稱，優先比對常見標準欄位"""
     exact_user_cols = ['userName', 'username', 'account', '用户名', '用戶名', '账号', '帳號', '会员账号', 'Member']
     lower_cols = {str(c).lower(): c for c in df.columns}
     
@@ -290,18 +286,22 @@ with st.sidebar:
     dt_start = datetime.datetime.combine(api_date_start, api_time_start)
     dt_end = datetime.datetime.combine(api_date_end, api_time_end)
     
-    # 【修改點】下拉式選單列出平台，預設為空白(全平台)。您可以依需求在此陣列中增減平台代碼。
-    platform_options = ["", "XO", "XO2", "AG", "PG", "CQ9", "JDB", "BBIN", "KY", "SBO"]
-    api_platform = st.selectbox("🏢 目標平台", options=platform_options, format_func=lambda x: "全平台 (預設不指定)" if x == "" else x)
+    # 平台清單設定 (依據需求嚴格寫死主平台，排除外接彩種)
+    platform_options = ["", "YD", "ND", "JD", "SY", "MT", "LY", "FB", "XY", "XO", "OL", "LS", "HS", "JY", "SH", "XH"]
+    api_platform = st.selectbox("🏢 目標平台", options=platform_options, format_func=lambda x: "全平台 (查詢所有平台)" if x == "" else x)
     
-    # 【修改點】獲取 API 數據按鈕移到時間與平台下方
+    # 【核心解法】
+    # 如果使用者選擇的是空白(全平台)，我們自動把清單裡除了空白以外的平台用逗號連接起來
+    # 變成 "XO,XO2,AG,PG,CQ9,JDB,BBIN,KY,SBO" 發送給 API，滿足其不可空值的限制。
+    actual_request_platform = api_platform if api_platform != "" else ",".join([p for p in platform_options if p != ""])
+    
     fetch_clicked = st.button("🔄 獲取 API 數據", type="primary", use_container_width=True)
     
     # 執行獲取數據邏輯
     if fetch_clicked:
         if mode == "用户彩票分析":
             with st.spinner("正在連線抓取【用户彩票分析】數據..."):
-                raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/lottery-analysis", dt_start, dt_end, api_platform)
+                raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/lottery-analysis", dt_start, dt_end, actual_request_platform)
                 if raw_data is not None and not raw_data.empty:
                     st.session_state.raw_data_a = raw_data
                     st.session_state.read_set_a = set()
@@ -310,7 +310,7 @@ with st.sidebar:
                     st.warning("⚠️ 此區間/平台查無資料或回傳為空")
         else:
             with st.spinner("正在連線抓取【盈亏排行】數據..."):
-                raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/member-income", dt_start, dt_end, api_platform)
+                raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/member-income", dt_start, dt_end, actual_request_platform)
                 if raw_data is not None and not raw_data.empty:
                     st.session_state.raw_data_b = raw_data
                     st.session_state.read_set_b = set()
