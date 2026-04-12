@@ -66,10 +66,13 @@ def fetch_api_data(url, dt_start, dt_end, platform):
     start_str = dt_start.strftime("%Y-%m-%d %H:%M:%S")
     end_str = dt_end.strftime("%Y-%m-%d %H:%M:%S")
     
+    # 繞過空白限制：如果 platform 為空，強制代入 XO
+    actual_platform = platform.strip() if platform and platform.strip() else "XO"
+    
     params = {
         "dateStart": start_str,
         "dateEnd": end_str,
-        "platform": platform.strip() if platform else "", # 若空白則傳送空字串代表全平台
+        "platform": actual_platform,
         "apiKey": API_KEY, 
         "key": API_KEY 
     }
@@ -101,7 +104,7 @@ def fetch_api_data(url, dt_start, dt_end, platform):
 # --- 核心引擎 A ---
 def run_audit_engine(df, rules):
     try:
-        if df.empty: return None
+        if df is None or df.empty: return None
         df.columns = [str(c).strip() for c in df.columns]
         
         # 精準識別「帳號」欄位 (避開純數字 ID 與 彩種名稱)
@@ -184,7 +187,7 @@ def run_audit_engine(df, rules):
 # --- 核心引擎 B ---
 def run_strict_audit(df, cfg):
     try:
-        if df.empty: return None
+        if df is None or df.empty: return None
         df.columns = [str(c).strip() for c in df.columns]
         
         # 尋找用戶名 (避開彩種與純數字 ID)
@@ -289,8 +292,8 @@ with st.sidebar:
     dt_start = datetime.datetime.combine(api_date_start, api_time_start)
     dt_end = datetime.datetime.combine(api_date_end, api_time_end)
     
-    # 修改：預設為空字串，提示更新為留白代表全平台
-    api_platform = st.text_input("🏢 目標平台代碼", value="", help="留白代表全平台，可逗号分隔多平台，如 XO 或 XO,XO2")
+    # 繞過必填限制：提供預設值，並提示若留白將自動使用 XO
+    api_platform = st.text_input("🏢 目標平台代碼", value="XO", help="API 限制不可留白，若清空將自動代入 XO。可填寫如 XO,XO2")
     st.write("---")
 
     st.markdown("## 🧭 模块切换")
@@ -302,7 +305,6 @@ if mode == "用户彩票分析":
     st.markdown("<div class='title-banner'><h1>📊 用户彩票分析</h1></div>", unsafe_allow_html=True)
     
     col_btn, _ = st.columns([1, 4])
-    # 修改：直接發送請求，不再阻擋平台為空
     if col_btn.button("🔄 獲取 API 數據", type="primary", use_container_width=True):
         with st.spinner("正在連線抓取數據..."):
             raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/lottery-analysis", dt_start, dt_end, api_platform)
@@ -387,7 +389,6 @@ else: # 盈亏排行
     st.markdown("<div class='title-banner'><h1>📈 盈亏排行审计</h1></div>", unsafe_allow_html=True)
     
     col_btn, _ = st.columns([1, 4])
-    # 修改：直接發送請求，不再阻擋平台為空
     if col_btn.button("🔄 獲取 API 數據", type="primary", use_container_width=True):
         with st.spinner("正在連線抓取數據..."):
             raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/member-income", dt_start, dt_end, api_platform)
