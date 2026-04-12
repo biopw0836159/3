@@ -50,7 +50,7 @@ if not st.session_state.auth:
             else: st.error("❌ 密码错误")
     st.stop()
 
-# --- API 獲取引擎 (強化版 WAF 繞過機制) ---
+# --- API 獲取引擎 (強化版 WAF 繞過與診斷機制) ---
 def fetch_api_data(url, dt_start, dt_end, platform):
     API_KEY = "sk-d79a713caf53e8bdh3154a596ca1a0166234df7"
     
@@ -79,26 +79,17 @@ def fetch_api_data(url, dt_start, dt_end, platform):
     session = requests.Session()
     
     try:
-        # 第一階段請求
         response = session.get(url, headers=headers, params=params, timeout=30)
         
-        # 嚴謹偵測 WAF 的 Date.now() JS 跳轉挑戰
-        if response.status_code == 200 and "location.href=" in response.text and "_r=" in response.text:
-            # 模擬瀏覽器的 setTimeout 800ms
+        # 嚴謹偵測初階 CC 防護 (setTimeout 800ms 跳轉)
+        if response.status_code == 200 and "location.href=" in response.text and "_r=" in response.text and "setTimeout" in response.text:
             time.sleep(0.9) 
-            
-            # 確保提取正確的 base URL (例如 https://stats-crawler.up.railway.app)
             parsed_url = urlparse(url)
             base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-            
             timestamp = int(time.time() * 1000)
             bypass_url = f"{base_url}/?_r={timestamp}"
-            
-            # 帶上 Referer 訪問驗證頁面，換取 Cookie
             headers["Referer"] = response.url
             session.get(bypass_url, headers=headers, timeout=15)
-            
-            # 攜帶認證過後的 Cookie 重新請求原始 API
             response = session.get(url, headers=headers, params=params, timeout=45)
 
         # 錯誤狀態碼攔截
@@ -106,12 +97,17 @@ def fetch_api_data(url, dt_start, dt_end, platform):
             st.error(f"⚠️ API 請求失敗 (狀態碼 {response.status_code})")
             return None
             
-        # 若繞過後仍然被擋，且為 HTML 格式，判定為失敗
+        # 【核心新增】：嚴謹偵測高階 AWS WAF 防護 (Proof-of-Work JS Challenge)
+        if "awsWafCookieDomainList" in response.text or "challenge.js" in response.text:
+            st.error("🛑 嚴重系統警告：遭到目標網站 AWS WAF 防火牆攔截")
+            st.warning("💡 診斷結論：您的後端 API (`stats-crawler.up.railway.app`) 去抓取目標資料時，被 AWS WAF 的人機驗證盾擋下了。這無法透過本前端程式修復，您必須登入後端伺服器更換爬蟲 IP，或升級後端爬蟲的自動化指紋繞過能力 (如使用 Selenium/Playwright)。")
+            with st.expander("🔍 點擊查看防火牆攔截特徵"):
+                st.text("特徵字眼包含: awsWafCookieDomainList, challenge.js, reportChallengeError")
+            return None
+            
+        # 其他未知的 HTML 頁面阻擋
         if response.text.strip().startswith('<!DOCTYPE') or '<html' in response.text.lower():
-            if "location.href=" in response.text:
-                st.error("❌ 伺服器防護極為嚴格，自動繞過 JS 盾失敗，請求被攔截。")
-            else:
-                st.error("❌ 伺服器回傳了未知的 HTML 防護頁面。")
+            st.error("❌ 伺服器防護極為嚴格，請求被徹底攔截 (非 JSON 數據)。")
             with st.expander("🔍 點擊查看伺服器實際回傳內容"):
                 st.text(response.text[:2000])
             return None
@@ -148,58 +144,60 @@ def get_platform_col(df):
         if any(a in str(c).lower().strip() for a in ['平台', 'platform', 'site']): return c
     return None
 
-# --- 極致嚴謹的帳號欄位提取引擎 (杜絕彩種與短數字干擾) ---
+# --- 極致嚴謹的帳號欄位提取引擎 (V3: 絕對杜絕彩種與短數字干擾) ---
 def get_exact_user_col(df):
     """
-    結合欄位名稱與實際資料內容進行雙重驗證。
-    絕不會抓到「奇趣分分彩」或「123」這種非帳號字串。
+    結合欄位名稱與實際資料內容進行極度嚴格的雙重驗證。
     """
-    # 1. 最高優先級：精準名單直指核心
     exact_user_cols = ['username', 'account', '用户名', '用戶名', '账号', '帳號', '会员账号', 'member', 'loginname', 'membername', 'user_name', 'user_account']
     lower_cols = {str(c).strip().lower(): c for c in df.columns}
     
+    # 1. 精準名稱直擊
     for col in exact_user_cols:
         if col in lower_cols:
             return lower_cols[col]
             
-    # 2. 禁忌關鍵字：欄位名稱包含這些，直接排除
+    # 2. 禁忌關鍵字：只要欄位名稱包含這些，直接秒殺排除
     forbidden_col_names = ['彩', '游戏', 'game', 'lottery', '平台', 'site', 'time', 'date', '期号', '订单', 'id', '单号', '金额', '盈亏', '状态', '名称']
     
-    # 彩種常見特徵字眼
-    game_keywords = ['pk10', '分分彩', '时时彩', '快3', '快三', '六合彩', '赛车', '飞艇', '百家乐', '体育', '电竞', '彩票', '真人', '龙虎']
+    # 彩種與無效數據特徵庫
+    game_keywords = ['pk10', '分分彩', '时时彩', '快3', '快三', '六合彩', '赛车', '飞艇', '百家乐', '体育', '电竞', '彩票', '真人', '龙虎', '三分', '五分', '秒速']
     
     best_candidate = None
     
     for c in df.columns:
         c_str = str(c).lower().strip()
         
-        # 排除禁忌欄位
-        if any(f in c_str for f in forbidden_col_names):
-            continue
+        if any(f in c_str for f in forbidden_col_names): continue
             
-        # 抽樣資料進行內容探勘
-        sample = df[c].dropna().astype(str).head(15)
+        sample = df[c].dropna().astype(str).head(20)
         if sample.empty: continue
         
-        # 檢查 A：若內容包含任何彩種關鍵字，該欄位絕對是遊戲名，剔除！
-        if any(any(gk in val.lower() for gk in game_keywords) for val in sample):
-            continue
+        # 嚴格審查 A：只要樣本中出現任何一個彩種特徵字，此欄位連同資料全部判定為無效
+        is_game_col = False
+        for val in sample:
+            if any(gk in val.lower() for gk in game_keywords):
+                is_game_col = True
+                break
+        if is_game_col: continue
             
-        # 檢查 B：如果全部都是超短純數字 (<5碼)，通常是流水號或ID，剔除！
-        if all(val.isdigit() and len(val) < 5 for val in sample):
-            continue
-            
-        # 通過上述嚴格檢驗後，若欄位名包含以下關鍵字，即認定為帳號
+        # 嚴格審查 B：絕對封殺「全為純數字且過短」的欄位 (例如流水號 ID)
+        # 若所有樣本字串都是數字，且平均長度小於 5 碼，直接排除
+        if all(val.isdigit() for val in sample):
+            avg_num_len = sum(len(val) for val in sample) / len(sample)
+            if avg_num_len < 5:
+                continue
+                
+        # 若通過上述極端測試，且名稱包含以下字根，即為帳號
         if any(k in c_str for k in ['user', 'account', '会员', '帐', '帳']):
             return c
             
-        # 備用候選：記錄第一個看起來像是字串、且平均長度合理的欄位
+        # 最嚴格的盲猜備案：必須是字串型態，且平均長度落在 5~20 的合理帳號範圍內
         if best_candidate is None and sample.dtype == object:
             avg_len = sum(len(val) for val in sample) / len(sample)
-            if 4 <= avg_len <= 25:  # 帳號長度通常落在此區間
+            if 5 <= avg_len <= 20 and not all(val.isdigit() for val in sample): 
                 best_candidate = c
 
-    # 若所有條件都沒中，安全回傳備用候選，若無備用才退回第一列
     return best_candidate if best_candidate else df.columns[0]
 
 # --- 核心引擎 A ---
