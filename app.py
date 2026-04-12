@@ -51,7 +51,7 @@ if not st.session_state.auth:
     st.stop()
 
 # --- API 獲取引擎 ---
-def fetch_api_data(url, date_start, date_end):
+def fetch_api_data(url, dt_start, dt_end, platform):
     """通用 API 數據獲取函式"""
     API_KEY = "sk-d79a713caf53e8bdh3154a596ca1a0166234df7"
     
@@ -62,14 +62,15 @@ def fetch_api_data(url, date_start, date_end):
         "Accept": "application/json"
     }
     
-    # 將使用者選擇的日期轉換為附帶 03:00:00 的精確時間格式
-    start_str = f"{date_start.strftime('%Y-%m-%d')} 03:00:00"
-    end_str = f"{date_end.strftime('%Y-%m-%d')} 03:00:00"
+    # 將使用者選擇的日期與時間轉為標準字串格式
+    start_str = dt_start.strftime("%Y-%m-%d %H:%M:%S")
+    end_str = dt_end.strftime("%Y-%m-%d %H:%M:%S")
     
     params = {
         "dateStart": start_str,
         "dateEnd": end_str,
-        "apiKey": API_KEY, # 將密鑰也放入 query 避免伺服器只吃 Query
+        "platform": platform, # 補上必填參數 platform
+        "apiKey": API_KEY, 
         "key": API_KEY 
     }
     
@@ -87,7 +88,7 @@ def fetch_api_data(url, date_start, date_end):
         return df
         
     except requests.exceptions.HTTPError as http_err:
-        # 如果發生 400 Bad Request 等錯誤，抓取伺服器的真實錯誤訊息並印出
+        # 抓取伺服器的真實錯誤訊息並印出
         error_body = response.text if response.text else "伺服器未提供錯誤說明"
         st.error(f"⚠️ API 請求失敗 (狀態碼 {response.status_code})")
         st.warning(f"**伺服器拒絕原因:** `{error_body}`")
@@ -270,14 +271,25 @@ def run_strict_audit(df, cfg):
 
 # 4. 侧边栏导航 & 日期選擇器
 with st.sidebar:
-    st.markdown("### 📅 時間區間篩選")
-    st.caption("⌚ 統計區間規則：當天 03:00 - 隔天 03:00")
+    st.markdown("### 📅 時間與平台參數設定")
+    st.caption("⌚ 預設區間為 當天 03:00 - 隔天 03:00，可自由調整。")
+    
     today = datetime.date.today()
     tomorrow = today + datetime.timedelta(days=1)
+    default_time = datetime.time(3, 0)
     
-    col_start, col_end = st.columns(2)
-    api_date_start = col_start.date_input("開始日期", today)
-    api_date_end = col_end.date_input("結束日期", tomorrow)
+    c1, c2 = st.columns(2)
+    api_date_start = c1.date_input("開始日期", today)
+    api_time_start = c2.time_input("開始時間", default_time)
+    
+    c3, c4 = st.columns(2)
+    api_date_end = c3.date_input("結束日期", tomorrow)
+    api_time_end = c4.time_input("結束時間", default_time)
+    
+    dt_start = datetime.datetime.combine(api_date_start, api_time_start)
+    dt_end = datetime.datetime.combine(api_date_end, api_time_end)
+    
+    api_platform = st.text_input("🏢 目標平台代碼", value="XO", help="可逗号分隔多平台，如 XO 或 XO,XO2")
     st.write("---")
 
     st.markdown("## 🧭 模块切换")
@@ -290,14 +302,17 @@ if mode == "用户彩票分析":
     
     col_btn, _ = st.columns([1, 4])
     if col_btn.button("🔄 獲取 API 數據", type="primary", use_container_width=True):
-        with st.spinner("正在連線抓取數據..."):
-            raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/lottery-analysis", api_date_start, api_date_end)
-            if raw_data is not None and not raw_data.empty:
-                st.session_state.raw_data_a = raw_data
-                st.session_state.read_set_a = set()
-                st.success("✅ 數據獲取成功！")
-            else:
-                st.warning("⚠️ 此區間查無資料或回傳為空 (若上方有顯示錯誤訊息請參考)")
+        if not api_platform:
+            st.warning("⚠️ 請先輸入目標平台代碼 (如 XO)")
+        else:
+            with st.spinner("正在連線抓取數據..."):
+                raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/lottery-analysis", dt_start, dt_end, api_platform)
+                if raw_data is not None and not raw_data.empty:
+                    st.session_state.raw_data_a = raw_data
+                    st.session_state.read_set_a = set()
+                    st.success("✅ 數據獲取成功！")
+                else:
+                    st.warning("⚠️ 此區間查無資料或回傳為空 (若上方有顯示錯誤訊息請參考)")
 
     raw = st.session_state.get("raw_data_a")
     all_games = []
@@ -374,14 +389,17 @@ else: # 盈亏排行
     
     col_btn, _ = st.columns([1, 4])
     if col_btn.button("🔄 獲取 API 數據", type="primary", use_container_width=True):
-        with st.spinner("正在連線抓取數據..."):
-            raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/member-income", api_date_start, api_date_end)
-            if raw_data is not None and not raw_data.empty:
-                st.session_state.raw_data_b = raw_data
-                st.session_state.read_set_b = set()
-                st.success("✅ 數據獲取成功！")
-            else:
-                st.warning("⚠️ 此區間查無資料或回傳為空 (若上方有顯示錯誤訊息請參考)")
+        if not api_platform:
+            st.warning("⚠️ 請先輸入目標平台代碼 (如 XO)")
+        else:
+            with st.spinner("正在連線抓取數據..."):
+                raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/member-income", dt_start, dt_end, api_platform)
+                if raw_data is not None and not raw_data.empty:
+                    st.session_state.raw_data_b = raw_data
+                    st.session_state.read_set_b = set()
+                    st.success("✅ 數據獲取成功！")
+                else:
+                    st.warning("⚠️ 此區間查無資料或回傳為空 (若上方有顯示錯誤訊息請參考)")
     
     raw_b = st.session_state.get("raw_data_b")
     all_games_b = []
