@@ -50,16 +50,18 @@ if not st.session_state.auth:
             else: st.error("❌ 密码错误")
     st.stop()
 
-# --- API 獲取引擎 (加入強健的防呆機制) ---
+# --- API 獲取引擎 (加入強健的防呆機制與反爬蟲偽裝) ---
 def fetch_api_data(url, dt_start, dt_end, platform):
     """通用 API 數據獲取函式"""
     API_KEY = "sk-d79a713caf53e8bdh3154a596ca1a0166234df7"
     
+    # 加入 User-Agent 偽裝成 Chrome 瀏覽器，避免被 WAF (如 Cloudflare) 阻擋並回傳 JS 驗證頁面
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "X-API-Key": API_KEY,
         "apikey": API_KEY,
-        "Accept": "application/json"
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
     start_str = dt_start.strftime("%Y-%m-%d %H:%M:%S")
@@ -76,7 +78,7 @@ def fetch_api_data(url, dt_start, dt_end, platform):
     try:
         response = requests.get(url, headers=headers, params=params, timeout=60)
         
-        # 1. 如果伺服器明確回傳錯誤狀態碼 (如 404, 500, 502)
+        # 1. 如果伺服器明確回傳錯誤狀態碼 (如 404, 500, 502, 403)
         if not response.ok:
             st.error(f"⚠️ API 請求失敗 (狀態碼 {response.status_code})")
             with st.expander("🔍 點擊查看伺服器拒絕詳情"):
@@ -87,7 +89,7 @@ def fetch_api_data(url, dt_start, dt_end, platform):
         try:
             data = response.json()
         except ValueError: # 捕捉 JSONDecodeError
-            st.error("❌ 伺服器回傳了無效的資料格式！(API 可能異常或當機中)")
+            st.error("❌ 伺服器回傳了無效的資料格式！(API 可能異常、當機或遭遇更強的反爬蟲機制)")
             st.warning("請展開下方訊息，確認伺服器到底回傳了什麼內容。")
             with st.expander("🔍 點擊查看伺服器實際回傳內容"):
                 st.text(response.text[:2000] if response.text else "（伺服器回傳為空）")
