@@ -62,27 +62,26 @@ def fetch_api_data(url, dt_start, dt_end, platform):
         "Accept": "application/json"
     }
     
-    # 將使用者選擇的日期與時間轉為標準字串格式
     start_str = dt_start.strftime("%Y-%m-%d %H:%M:%S")
     end_str = dt_end.strftime("%Y-%m-%d %H:%M:%S")
-    
-    # 繞過空白限制：如果 platform 為空，強制代入 XO
-    actual_platform = platform.strip() if platform and platform.strip() else "XO"
     
     params = {
         "dateStart": start_str,
         "dateEnd": end_str,
-        "platform": actual_platform,
         "apiKey": API_KEY, 
         "key": API_KEY 
     }
     
+    # 【修改點】繞過強制帶入 XO 的邏輯，如果選擇全平台（空白），則帶入空值或不帶平台參數
+    actual_platform = platform.strip() if platform else ""
+    if actual_platform:
+        params["platform"] = actual_platform
+    
     try:
         response = requests.get(url, headers=headers, params=params, timeout=60)
-        response.raise_for_status() # 檢查 HTTP 狀態碼
+        response.raise_for_status()
         data = response.json()
         
-        # 兼容常見 API JSON 結構 (直接回傳陣列 或 包在 data 欄位內)
         if isinstance(data, dict) and 'data' in data:
             df = pd.DataFrame(data['data'])
         else:
@@ -91,7 +90,6 @@ def fetch_api_data(url, dt_start, dt_end, platform):
         return df
         
     except requests.exceptions.HTTPError as http_err:
-        # 抓取伺服器的真實錯誤訊息並印出
         error_body = response.text if response.text else "伺服器未提供錯誤說明"
         st.error(f"⚠️ API 請求失敗 (狀態碼 {response.status_code})")
         st.warning(f"**伺服器拒絕原因:** `{error_body}`")
@@ -101,29 +99,41 @@ def fetch_api_data(url, dt_start, dt_end, platform):
         st.error(f"API 請求發生未預期的錯誤！詳細錯誤: {e}")
         return None
 
+# --- 通用：精準獲取帳號欄位 ---
+def get_exact_user_col(df):
+    """【修改點】精準抓取 API 端口帳號名稱，優先比對常見標準欄位"""
+    exact_user_cols = ['userName', 'username', 'account', '用户名', '用戶名', '账号', '帳號', '会员账号', 'Member']
+    lower_cols = {str(c).lower(): c for c in df.columns}
+    
+    # 1. 優先進行精準比對 (忽略大小寫)
+    for col in exact_user_cols:
+        if col.lower() in lower_cols:
+            return lower_cols[col.lower()]
+            
+    # 2. 降級：如果沒找到，則進行原本的模糊過濾
+    user_aliases = ['账号', '帳號', '用户名', '用戶名', '会员', 'user', 'account']
+    user_candidates = [c for c in df.columns if any(a in str(c).lower() for a in user_aliases)]
+    
+    valid_user_col = None
+    for c in user_candidates:
+        if any(forbidden in str(c).lower() for forbidden in ['彩种', '游戏', 'game', 'lottery']):
+            continue
+        sample = df[c].dropna().astype(str).head(10)
+        if sample.empty: continue
+        short_digits_count = sum(1 for x in sample if x.isdigit() and len(x) < 5)
+        if short_digits_count < len(sample) * 0.5:
+            valid_user_col = c
+            break
+            
+    return valid_user_col if valid_user_col else (user_candidates[0] if user_candidates else df.columns[0])
+
 # --- 核心引擎 A ---
 def run_audit_engine(df, rules):
     try:
         if df is None or df.empty: return None
         df.columns = [str(c).strip() for c in df.columns]
         
-        # 精準識別「帳號」欄位 (避開純數字 ID 與 彩種名稱)
-        user_aliases = ['账号', '帳號', '用户名', '用戶名', '会员', 'user', 'account']
-        user_candidates = [c for c in df.columns if any(a in str(c).lower() for a in user_aliases)]
-        
-        valid_user_col = None
-        for c in user_candidates:
-            if any(forbidden in str(c) for forbidden in ['彩种', '游戏', 'game']):
-                continue
-            sample = df[c].dropna().astype(str).head(10)
-            if sample.empty: continue
-            # 判斷是否為純數字短字串 (如 ID)，若是則過濾
-            short_digits_count = sum(1 for x in sample if x.isdigit() and len(x) < 5)
-            if short_digits_count < len(sample) * 0.5:
-                valid_user_col = c
-                break
-                
-        final_user_col = valid_user_col if valid_user_col else (user_candidates[0] if user_candidates else df.columns[0])
+        final_user_col = get_exact_user_col(df)
 
         mapping = {
             'vol': ['销量', '投注', 'betAmount', 'amount', '打码'],
@@ -137,8 +147,7 @@ def run_audit_engine(df, rules):
             for col in df.columns:
                 if any(a.lower() in str(col).lower() for a in aliases): final_cols[k] = col; break
                 
-        # 提取彩种字段
-        game_cols = [c for c in df.columns if any(g in str(c) for g in ['彩种', '游戏', '彩种名称', 'Game', 'lottery'])]
+        game_cols = [c for c in df.columns if any(g in str(c).lower() for g in ['彩种', '游戏', '彩种名称', 'game', 'lottery'])]
         has_game = len(game_cols) > 0
 
         temp_df = pd.DataFrame()
@@ -151,7 +160,6 @@ def run_audit_engine(df, rules):
         if has_game:
             temp_df['彩种'] = df[game_cols[0]].astype(str)
 
-        # 聚合规则
         agg_dict = {'销量':'sum', '单数':'sum', '盈亏':'sum', '奖金':'sum'}
         if has_game:
             agg_dict['彩种'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
@@ -190,19 +198,8 @@ def run_strict_audit(df, cfg):
         if df is None or df.empty: return None
         df.columns = [str(c).strip() for c in df.columns]
         
-        # 尋找用戶名 (避開彩種與純數字 ID)
-        user_aliases = ['账号', '帳號', '用户名', '用戶名', '会员', 'user', 'account']
-        user_candidates = [c for c in df.columns if any(a in str(c).lower() for a in user_aliases)]
-        valid_user_col = None
-        for c in user_candidates:
-            if '彩种' in str(c) or '游戏' in str(c): continue
-            sample = df[c].dropna().astype(str).head(10)
-            if sum(1 for x in sample if x.isdigit() and len(x) < 5) < len(sample) * 0.5:
-                valid_user_col = c
-                break
-        final_user_col = valid_user_col if valid_user_col else (user_candidates[0] if user_candidates else df.columns[0])
+        final_user_col = get_exact_user_col(df)
 
-        # 尋找盈虧欄位
         profit_col = None
         for c in df.columns:
             if any(p in str(c).lower() for p in ['盈亏', '盈利', 'profit']):
@@ -210,14 +207,12 @@ def run_strict_audit(df, cfg):
                 break
         if not profit_col: profit_col = df.columns[-1]
 
-        # 提取彩种字段
-        game_cols = [c for c in df.columns if any(g in str(c) for g in ['彩种', '游戏', '彩种名称', 'Game', 'lottery'])]
+        game_cols = [c for c in df.columns if any(g in str(c).lower() for g in ['彩种', '游戏', '彩种名称', 'game', 'lottery'])]
         has_game = len(game_cols) > 0
 
         clean_df = pd.DataFrame()
         clean_df['用户名'] = df[final_user_col].astype(str)
         
-        # 彈性尋找目標欄位
         target_mappings = {
             '个人充值手续费': ['充值', 'recharge', 'fee', '个人充值手续费'],
             '个人派奖': ['派奖', 'payout', 'win', '个人派奖'],
@@ -239,7 +234,6 @@ def run_strict_audit(df, cfg):
         if has_game:
             clean_df['彩种'] = df[game_cols[0]].astype(str)
 
-        # 聚合规则
         agg_dict = {'个人充值手续费':'sum','个人派奖':'sum','个人自身返点/返水':'sum','个人系统分红':'sum','盈亏':'sum'}
         if has_game:
             agg_dict['彩种'] = lambda x: ', '.join(sorted(list(set([str(i) for i in x if str(i).strip() not in ['nan', 'None', '']]))))
@@ -272,8 +266,12 @@ def run_strict_audit(df, cfg):
         st.error(f"分析引擎發生異常: {e}")
         return None
 
-# 4. 侧边栏导航 & 日期選擇器
+# 4. 侧边栏导航、時間平台設定與獲取數據按鈕
 with st.sidebar:
+    st.markdown("## 🧭 模块切换")
+    mode = st.radio("选择分析类型", ["用户彩票分析", "盈亏排行"])
+    st.write("---")
+
     st.markdown("### 📅 時間與平台參數設定")
     st.caption("⌚ 預設區間為 當天 03:00 - 隔天 03:00，可自由調整。")
     
@@ -292,28 +290,39 @@ with st.sidebar:
     dt_start = datetime.datetime.combine(api_date_start, api_time_start)
     dt_end = datetime.datetime.combine(api_date_end, api_time_end)
     
-    # 繞過必填限制：提供預設值，並提示若留白將自動使用 XO
-    api_platform = st.text_input("🏢 目標平台代碼", value="XO", help="API 限制不可留白，若清空將自動代入 XO。可填寫如 XO,XO2")
+    # 【修改點】下拉式選單列出平台，預設為空白(全平台)。您可以依需求在此陣列中增減平台代碼。
+    platform_options = ["", "XO", "XO2", "AG", "PG", "CQ9", "JDB", "BBIN", "KY", "SBO"]
+    api_platform = st.selectbox("🏢 目標平台", options=platform_options, format_func=lambda x: "全平台 (預設不指定)" if x == "" else x)
+    
+    # 【修改點】獲取 API 數據按鈕移到時間與平台下方
+    fetch_clicked = st.button("🔄 獲取 API 數據", type="primary", use_container_width=True)
+    
+    # 執行獲取數據邏輯
+    if fetch_clicked:
+        if mode == "用户彩票分析":
+            with st.spinner("正在連線抓取【用户彩票分析】數據..."):
+                raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/lottery-analysis", dt_start, dt_end, api_platform)
+                if raw_data is not None and not raw_data.empty:
+                    st.session_state.raw_data_a = raw_data
+                    st.session_state.read_set_a = set()
+                    st.success("✅ 數據獲取成功！")
+                else:
+                    st.warning("⚠️ 此區間/平台查無資料或回傳為空")
+        else:
+            with st.spinner("正在連線抓取【盈亏排行】數據..."):
+                raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/member-income", dt_start, dt_end, api_platform)
+                if raw_data is not None and not raw_data.empty:
+                    st.session_state.raw_data_b = raw_data
+                    st.session_state.read_set_b = set()
+                    st.success("✅ 數據獲取成功！")
+                else:
+                    st.warning("⚠️ 此區間/平台查無資料或回傳為空")
+    
     st.write("---")
 
-    st.markdown("## 🧭 模块切换")
-    mode = st.radio("选择分析类型", ["用户彩票分析", "盈亏排行"])
-    st.write("---")
-
-# 5. 模块逻辑切换
+# 5. 模块逻辑切换 (渲染主畫面與側邊過濾器)
 if mode == "用户彩票分析":
     st.markdown("<div class='title-banner'><h1>📊 用户彩票分析</h1></div>", unsafe_allow_html=True)
-    
-    col_btn, _ = st.columns([1, 4])
-    if col_btn.button("🔄 獲取 API 數據", type="primary", use_container_width=True):
-        with st.spinner("正在連線抓取數據..."):
-            raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/lottery-analysis", dt_start, dt_end, api_platform)
-            if raw_data is not None and not raw_data.empty:
-                st.session_state.raw_data_a = raw_data
-                st.session_state.read_set_a = set()
-                st.success("✅ 數據獲取成功！")
-            else:
-                st.warning("⚠️ 此區間查無資料或回傳為空 (若上方有顯示錯誤訊息請參考)")
 
     raw = st.session_state.get("raw_data_a")
     all_games = []
@@ -321,7 +330,7 @@ if mode == "用户彩票分析":
     selected_games = []
 
     if raw is not None:
-        game_cols = [c for c in raw.columns if any(g in str(c) for g in ['彩种', '游戏', '彩种名称', 'Game', 'lottery'])]
+        game_cols = [c for c in raw.columns if any(g in str(c).lower() for g in ['彩种', '游戏', '彩种名称', 'game', 'lottery'])]
         if game_cols:
             game_col = game_cols[0]
             all_games = sorted(raw[game_col].astype(str).dropna().unique().tolist())
@@ -388,24 +397,13 @@ if mode == "用户彩票分析":
 else: # 盈亏排行
     st.markdown("<div class='title-banner'><h1>📈 盈亏排行审计</h1></div>", unsafe_allow_html=True)
     
-    col_btn, _ = st.columns([1, 4])
-    if col_btn.button("🔄 獲取 API 數據", type="primary", use_container_width=True):
-        with st.spinner("正在連線抓取數據..."):
-            raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/member-income", dt_start, dt_end, api_platform)
-            if raw_data is not None and not raw_data.empty:
-                st.session_state.raw_data_b = raw_data
-                st.session_state.read_set_b = set()
-                st.success("✅ 數據獲取成功！")
-            else:
-                st.warning("⚠️ 此區間查無資料或回傳為空 (若上方有顯示錯誤訊息請參考)")
-    
     raw_b = st.session_state.get("raw_data_b")
     all_games_b = []
     game_col_b = None
     selected_games_b = []
 
     if raw_b is not None:
-        game_cols_b = [c for c in raw_b.columns if any(g in str(c) for g in ['彩种', '游戏', '彩种名称', 'Game', 'lottery'])]
+        game_cols_b = [c for c in raw_b.columns if any(g in str(c).lower() for g in ['彩种', '游戏', '彩种名称', 'game', 'lottery'])]
         if game_cols_b:
             game_col_b = game_cols_b[0]
             all_games_b = sorted(raw_b[game_col_b].astype(str).dropna().unique().tolist())
