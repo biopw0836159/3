@@ -69,7 +69,7 @@ def fetch_api_data(url, dt_start, dt_end, platform):
     params = {
         "dateStart": start_str,
         "dateEnd": end_str,
-        "platform": platform, # 補上必填參數 platform
+        "platform": platform.strip() if platform else "", # 若空白則傳送空字串代表全平台
         "apiKey": API_KEY, 
         "key": API_KEY 
     }
@@ -289,7 +289,8 @@ with st.sidebar:
     dt_start = datetime.datetime.combine(api_date_start, api_time_start)
     dt_end = datetime.datetime.combine(api_date_end, api_time_end)
     
-    api_platform = st.text_input("🏢 目標平台代碼", value="XO", help="可逗号分隔多平台，如 XO 或 XO,XO2")
+    # 修改：預設為空字串，提示更新為留白代表全平台
+    api_platform = st.text_input("🏢 目標平台代碼", value="", help="留白代表全平台，可逗号分隔多平台，如 XO 或 XO,XO2")
     st.write("---")
 
     st.markdown("## 🧭 模块切换")
@@ -301,18 +302,16 @@ if mode == "用户彩票分析":
     st.markdown("<div class='title-banner'><h1>📊 用户彩票分析</h1></div>", unsafe_allow_html=True)
     
     col_btn, _ = st.columns([1, 4])
+    # 修改：直接發送請求，不再阻擋平台為空
     if col_btn.button("🔄 獲取 API 數據", type="primary", use_container_width=True):
-        if not api_platform:
-            st.warning("⚠️ 請先輸入目標平台代碼 (如 XO)")
-        else:
-            with st.spinner("正在連線抓取數據..."):
-                raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/lottery-analysis", dt_start, dt_end, api_platform)
-                if raw_data is not None and not raw_data.empty:
-                    st.session_state.raw_data_a = raw_data
-                    st.session_state.read_set_a = set()
-                    st.success("✅ 數據獲取成功！")
-                else:
-                    st.warning("⚠️ 此區間查無資料或回傳為空 (若上方有顯示錯誤訊息請參考)")
+        with st.spinner("正在連線抓取數據..."):
+            raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/lottery-analysis", dt_start, dt_end, api_platform)
+            if raw_data is not None and not raw_data.empty:
+                st.session_state.raw_data_a = raw_data
+                st.session_state.read_set_a = set()
+                st.success("✅ 數據獲取成功！")
+            else:
+                st.warning("⚠️ 此區間查無資料或回傳為空 (若上方有顯示錯誤訊息請參考)")
 
     raw = st.session_state.get("raw_data_a")
     all_games = []
@@ -388,18 +387,16 @@ else: # 盈亏排行
     st.markdown("<div class='title-banner'><h1>📈 盈亏排行审计</h1></div>", unsafe_allow_html=True)
     
     col_btn, _ = st.columns([1, 4])
+    # 修改：直接發送請求，不再阻擋平台為空
     if col_btn.button("🔄 獲取 API 數據", type="primary", use_container_width=True):
-        if not api_platform:
-            st.warning("⚠️ 請先輸入目標平台代碼 (如 XO)")
-        else:
-            with st.spinner("正在連線抓取數據..."):
-                raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/member-income", dt_start, dt_end, api_platform)
-                if raw_data is not None and not raw_data.empty:
-                    st.session_state.raw_data_b = raw_data
-                    st.session_state.read_set_b = set()
-                    st.success("✅ 數據獲取成功！")
-                else:
-                    st.warning("⚠️ 此區間查無資料或回傳為空 (若上方有顯示錯誤訊息請參考)")
+        with st.spinner("正在連線抓取數據..."):
+            raw_data = fetch_api_data("https://stats-crawler.up.railway.app/api/open/member-income", dt_start, dt_end, api_platform)
+            if raw_data is not None and not raw_data.empty:
+                st.session_state.raw_data_b = raw_data
+                st.session_state.read_set_b = set()
+                st.success("✅ 數據獲取成功！")
+            else:
+                st.warning("⚠️ 此區間查無資料或回傳為空 (若上方有顯示錯誤訊息請參考)")
     
     raw_b = st.session_state.get("raw_data_b")
     all_games_b = []
